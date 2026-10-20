@@ -47,6 +47,19 @@
   <h2>손</h2>
   <div class="row"><select id="hand"></select><button id="reset">warm start 리셋</button></div>
   <div id="handnote" class="muted"></div>
+  <div id="backendbox">
+    <h2>리타겟 방식</h2>
+    <div class="row" id="backendbtns">
+      <button data-be="dexpilot">DexPilot (+λ)</button>
+      <button data-be="tesollo">Tesollo 공식 매핑</button>
+    </div>
+    <div class="row"><label>비교 손</label><input type="checkbox" id="compare"><span class="muted">다른 방식 결과를 옆에 반투명으로</span></div>
+    <div class="row"><label>Manus 보정계수</label><input type="checkbox" id="tcalib"><span class="muted">PIP×1.3·DIP×1.7, 검지−40°·중지−30° (장갑용 값)</span></div>
+    <div class="row"><label>엄지 = DexPilot</label><input type="checkbox" id="tthumbdp"><span class="muted">엄지만 손끝 최적화 결과 사용(핀치 대립용)</span></div>
+    <div id="thumbknobs"></div>
+    <div class="muted" id="thumbmeas"></div>
+    <div class="muted">Tesollo 매핑 = tesollo_ros2 manus_retarget.py 공식을 Quest 관절각에 적용(손끝 최적화 없음). 엄지: thumb1 = 손바닥 평면 안 벌림각 + 오프셋, thumb2 = −1.6×(손바닥 쪽 들림각 − 중립).</div>
+  </div>
 
   <h2>입력</h2>
   <div class="row" id="srcbtns">
@@ -112,10 +125,11 @@ const KP_FINGER = i => i <= 4 ? 'thumb' : FINGERS[1 + Math.floor((i - 5) / 5)];
 const STORE = 'retargetViewer.v1';
 const S = { hand: 'dg5f', src: 'preset', preset: 'open', knobs: null, locks: {}, synth: null,
             show: { skeleton: true, targets: true, tips: true, errlines: true, pairs: true, axes: false },
-            opacity: 0.85, cam: 'palm' };
+            opacity: 0.85, cam: 'palm', backend: 'dexpilot', compare: true };
 try { Object.assign(S, JSON.parse(localStorage.getItem(STORE) || '{}')); } catch (e) {}
 const save = () => { try { localStorage.setItem(STORE, JSON.stringify(S)); } catch (e) {} };
 let INFO = null, robot = null, overlay = null, last = null, loadTok = 0;
+let ghost = null;   // 비교 손 (다른 리타겟 방식)
 
 // ------------------------------------------------------------------ three
 const canvas = $('c');
@@ -131,6 +145,7 @@ scene.add(new THREE.HemisphereLight(0xe8eeff, 0x30343c, 1.1));
 const key = new THREE.DirectionalLight(0xffffff, 1.4); key.position.set(0.4, 0.8, 0.6); scene.add(key);
 const fill = new THREE.DirectionalLight(0xbcd2ff, 0.5); fill.position.set(-0.6, 0.1, -0.5); scene.add(fill);
 const pivot = new THREE.Group(); pivot.rotation.x = -Math.PI / 2; scene.add(pivot);   // URDF Z-up → three Y-up
+const pivot2 = new THREE.Group(); pivot2.rotation.x = -Math.PI / 2; scene.add(pivot2); // 비교 손
 const grid = new THREE.GridHelper(0.6, 12, 0x2c323c, 0x22262d); grid.position.y = -0.12; scene.add(grid);
 function resize() {
   const r = $('viewport').getBoundingClientRect();
@@ -152,13 +167,20 @@ function loadRobot() {
     else if (ext === 'dae') dae.load(path, c => done(c.scene), undefined, e => done(null, e));
     else done(null, new Error('mesh 형식 미지원: ' + path));
   };
-  let pending = null;
-  manager.onLoad = () => { if (pending && tok === loadTok) { setupRobot(pending); pending = null; } };
+  let pending = null, pending2 = null;
+  manager.onLoad = () => { if (pending && pending2 && tok === loadTok) { setupRobot(pending, pending2); pending = pending2 = null; } };
   loader.load(h.urdf, r => { pending = r; }, undefined, e => showErr('URDF 로드 실패: ' + e));
+  loader.load(h.urdf, r => { pending2 = r; }, undefined, e => showErr('URDF 로드 실패: ' + e));
 }
-function setupRobot(r) {
+function setupRobot(r, r2) {
   if (robot) { pivot.remove(robot); robot.traverse(o => { o.geometry?.dispose(); }); }
+  if (ghost) { pivot2.remove(ghost); ghost.traverse(o => { o.geometry?.dispose(); }); }
   robot = r; pivot.add(robot);
+  ghost = r2; pivot2.add(ghost); ghost.visible = false;
+  ghost.traverse(o => {
+    if (!o.isMesh) return;
+    o.material = new THREE.MeshStandardMaterial({ color: 0x7fb4ff, roughness: 0.6, transparent: true, opacity: 0.45, side: THREE.DoubleSide });
+  });
   robot.traverse(o => {
     if (!o.isMesh) return;
     o.material = new THREE.MeshStandardMaterial({ color: 0xb8bec8, roughness: 0.55, metalness: 0.05,
@@ -168,6 +190,10 @@ function setupRobot(r) {
   const h = INFO.hands[S.hand];
   overlay = new THREE.Group();
   robot.links[h.base_link].add(overlay);
+  // 비교 손은 새끼쪽(base −y)으로 손 폭만큼 옆에
+  robot.updateMatrixWorld(true);
+  const qb = robot.links[h.base_link].getWorldQuaternion(new THREE.Quaternion());
+  pivot2.position.copy(new THREE.Vector3(0, -0.15, 0).applyQuaternion(qb));
   setCam(S.cam);
 }
 function colorFingers() {           // 손끝 링크까지의 체인을 손가락 색으로 옅게
@@ -184,7 +210,10 @@ function colorFingers() {           // 손끝 링크까지의 체인을 손가�
 function setCam(v) {
   S.cam = v; save();
   if (!robot) return;
-  const box = new THREE.Box3().setFromObject(robot), c = box.getCenter(new THREE.Vector3());
+  scene.updateMatrixWorld(true);            // pivot2 이동이 반영된 뒤에 상자를 잰다
+  const box = new THREE.Box3().setFromObject(robot);
+  if (S.compare && ghost) { const v = ghost.visible; ghost.visible = true; box.union(new THREE.Box3().setFromObject(ghost)); ghost.visible = v; }
+  const c = box.getCenter(new THREE.Vector3());
   const d = box.getSize(new THREE.Vector3()).length() * 1.6;
   // base 프레임 축을 월드로: 손바닥 법선이 어디냐는 손마다 다르니 base_link 의 회전에서 뽑는다
   const base = robot.links[INFO.hands[S.hand].base_link];
@@ -237,12 +266,13 @@ function renderTables(f) {
     f.pairs.filter(p => p.a === 'thumb' || p.proj).map(p =>
       `<tr><td>${p.a}–${p.b}</td><td>${p.human_mm.toFixed(0)}</td><td>${p.robot_mm.toFixed(0)}</td><td>${p.proj ? '●' : ''}</td></tr>`).join('');
   const h = INFO.hands[S.hand], lim = new Set(f.at_limit);
-  $('joints').innerHTML = '<tr><th>DOF</th><th>URDF°</th><th></th><th>범위°</th></tr>' + h.dofs.map(d => {
+  const G = f.q_ghost;
+  $('joints').innerHTML = `<tr><th>DOF</th><th>URDF°</th>${G ? '<th>비교°</th>' : ''}<th></th><th>범위°</th></tr>` + h.dofs.map(d => {
     const v = f.q[d.joint]; if (v === undefined) return '';
     const lo = d.lo, hi = d.hi, frac = hi > lo ? (v - lo) / (hi - lo) : 0.5;
     const locked = d.joint in S.locks;
     return `<tr class="${lim.has(d.joint) ? 'lim' : ''}"><td title="${d.joint}">${d.wire}${locked ? ' 🔒' : ''}</td>
-      <td>${(v * 180 / Math.PI).toFixed(1)}</td>
+      <td>${(v * 180 / Math.PI).toFixed(1)}</td>${G ? `<td class="muted">${G[d.joint] === undefined ? '' : (G[d.joint] * 180 / Math.PI).toFixed(1)}</td>` : ''}
       <td><div class="bar"><i style="left:calc(${(frac * 100).toFixed(1)}% - 1px)"></i></div></td>
       <td class="muted">${(lo * 180 / Math.PI).toFixed(0)}..${(hi * 180 / Math.PI).toFixed(0)}</td></tr>`;
   }).join('');
@@ -263,7 +293,8 @@ function connect() {
   };
 }
 const send = o => ws && ws.readyState === 1 && ws.send(JSON.stringify(o));
-const sendConfig = () => send({ type: 'config', hand: S.hand, knobs: S.knobs, locks: S.locks });
+const sendConfig = () => send({ type: 'config', hand: S.hand, knobs: S.knobs, locks: S.locks,
+                                backend: S.backend, compare: S.compare });
 function sendSource() {
   if (S.src === 'preset') send({ type: 'source', kind: 'preset', name: S.preset });
   else if (S.src === 'synth') send({ type: 'source', kind: 'synth', params: S.synth });
@@ -286,10 +317,18 @@ function onFrame(f) {
   if (robot) {
     for (const [j, v] of Object.entries(f.q)) robot.joints[j]?.setJointValue(v);
   }
+  if (ghost) {
+    ghost.visible = !!f.q_ghost;
+    if (f.q_ghost) for (const [j, v] of Object.entries(f.q_ghost)) ghost.joints[j]?.setJointValue(v);
+  }
   drawOverlay(f);
   renderTables(f);
+  if (f.ergo) $('thumbmeas').textContent = `엄지 측정: 평면 안 벌림 ${f.ergo.ThumbInPlane}° · 손바닥 쪽 들림 ${f.ergo.ThumbElevation}° (손 편 상태에서 thumb2≈0 이 되게 '대립 중립'을 들림각 근처로)`;
   const proj = f.pairs.filter(p => p.proj).map(p => `${p.a}–${p.b}`).join(', ') || '-';
-  $('hud').innerHTML = `<b>${INFO.hands[S.hand].label}</b> · solve <b>${f.solve_ms.toFixed(1)} ms</b> · 투영 쌍 <b>${proj}</b>` +
+  const BE = { dexpilot: 'DexPilot(+λ)', tesollo: 'Tesollo 공식 매핑' };
+  $('hud').innerHTML = `<b>${INFO.hands[S.hand].label}</b> · 메인 <b>${BE[f.backend] || '-'}</b>` +
+    (f.q_ghost ? ` · 반투명 파랑(왼쪽) = <b>${BE[f.ghost_backend]}</b>` : '') +
+    ` · solve <b>${f.solve_ms.toFixed(1)} ms</b> · 투영 쌍 <b>${proj}</b>` +
     (f.at_limit.length ? ` · <span style="color:var(--warn)">한계 ${f.at_limit.length}개</span>` : '') +
     `<br><span class="sw" style="background:#8a93a0"></span>사람 손(손 프레임) <span class="sw" style="background:#ffae42"></span>목표(뼈길이 정규화) <span class="sw" style="background:#fff"></span>로봇 손끝 <span class="sw" style="background:#ffff66"></span>투영 접촉`;
 }
@@ -320,10 +359,33 @@ function buildSource() {
   slider(sp, '엄지 굽힘°', 0, 60, 1, S.synth.thumb_curl, v => { S.synth.thumb_curl = v; upd(); });
   slider(sp, '엄지 스윙°', -30, 60, 1, S.synth.thumb_swing, v => { S.synth.thumb_swing = v; upd(); });
 }
+function buildBackend() {
+  const ok = !!INFO.hands[S.hand].tesollo;
+  $('backendbox').hidden = !ok;
+  document.querySelectorAll('#backendbtns button').forEach(b => b.classList.toggle('on', b.dataset.be === S.backend));
+  $('compare').checked = !!S.compare;
+  S.knobs ||= JSON.parse(JSON.stringify(INFO.knobs));
+  $('tcalib').checked = S.knobs.tesollo_calib !== false;
+  $('tthumbdp').checked = S.knobs.tesollo_thumb_dp !== false;
+  const el = $('thumbknobs'); el.innerHTML = '';
+  S.knobs.thumb_in_off ??= 0; S.knobs.thumb_elev0 ??= 15;
+  const upd = () => { save(); sendConfig(); };
+  slider(el, '엄지 벌림 오프셋°', -40, 40, 1, S.knobs.thumb_in_off, v => { S.knobs.thumb_in_off = v; upd(); });
+  slider(el, '엄지 대립 중립°', -20, 60, 1, S.knobs.thumb_elev0, v => { S.knobs.thumb_elev0 = v; upd(); });
+}
 function buildKnobs() {
   S.knobs ||= JSON.parse(JSON.stringify(INFO.knobs));
   const k = S.knobs, el = $('knobs'); el.innerHTML = '';
   const upd = () => { save(); sendConfig(); };
+  if (INFO.hands[S.hand].angle_prior) {
+    k.angle_prior ??= 0;
+    k.pinch_scale ??= 1;
+    slider(el, '관절각 사전항 λ', 0, 1, 0.01, k.angle_prior, v => { k.angle_prior = v; upd(); }, v => v ? v.toFixed(2) : '끔');
+    slider(el, '핀치 중 λ 배율', 0.01, 1, 0.01, k.pinch_scale, v => { k.pinch_scale = v; upd(); }, v => '×' + v.toFixed(2));
+    const n = document.createElement('div'); n.className = 'muted';
+    n.textContent = '손가락 모양을 사람 관절각 쪽으로 당김(0=원래 DexPilot). 엄지와 접촉 중인 손가락만 λ×배율로 낮춰 핀치는 닫히게. 권장 λ 0.3 · 배율 ×0.05 — prior.py';
+    el.appendChild(n);
+  }
   slider(el, 'scale', 0.6, 1.6, 0.01, k.scale ?? 1, v => { k.scale = v; upd(); }, v => v.toFixed(2));
   slider(el, 'project_dist mm', 5, 80, 1, (k.project_dist ?? 0.03) * 1e3, v => { k.project_dist = v / 1e3; upd(); });
   slider(el, 'escape_dist mm', 10, 120, 1, (k.escape_dist ?? 0.05) * 1e3, v => { k.escape_dist = v / 1e3; upd(); });
@@ -377,8 +439,12 @@ async function init() {
   if (!INFO.hands[S.hand]) S.hand = 'dg5f';
   $('hand').innerHTML = Object.entries(INFO.hands).map(([k, h]) => `<option value="${k}">${h.label}</option>`).join('');
   $('hand').value = S.hand;
-  $('hand').onchange = () => { S.hand = $('hand').value; S.locks = {}; save(); buildLocks(); sendConfig(); loadRobot(); };
+  $('hand').onchange = () => { S.hand = $('hand').value; S.locks = {}; save(); buildLocks(); buildKnobs(); buildBackend(); sendConfig(); loadRobot(); };
   $('reset').onclick = () => send({ type: 'reset' });
+  document.querySelectorAll('#backendbtns button').forEach(b => b.onclick = () => { S.backend = b.dataset.be; save(); buildBackend(); sendConfig(); });
+  $('compare').onchange = () => { S.compare = $('compare').checked; save(); sendConfig(); setCam(S.cam); };
+  $('tcalib').onchange = () => { S.knobs.tesollo_calib = $('tcalib').checked; save(); sendConfig(); };
+  $('tthumbdp').onchange = () => { S.knobs.tesollo_thumb_dp = $('tthumbdp').checked; save(); sendConfig(); };
   document.querySelectorAll('#srcbtns button').forEach(b => b.onclick = () => { S.src = b.dataset.src; save(); buildSource(); sendSource(); });
   document.querySelectorAll('[data-cam]').forEach(b => b.onclick = () => setCam(b.dataset.cam));
   $('recbtn').onclick = () => {
@@ -392,7 +458,7 @@ async function init() {
   $('opacity').oninput = () => { S.opacity = +$('opacity').value; $('opacityv').textContent = S.opacity; save();
     robot?.traverse(o => { if (o.isMesh) o.material.opacity = S.opacity; }); };
   $('recsel').innerHTML = INFO.recordings.map(n => `<option>${n}</option>`).join('') || '<option value="">(녹화 없음)</option>';
-  buildSource(); buildKnobs(); buildLocks(); buildDisplay();
+  buildSource(); buildKnobs(); buildBackend(); buildLocks(); buildDisplay();
   loadRobot();
   connect();
 }

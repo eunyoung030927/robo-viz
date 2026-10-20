@@ -22,6 +22,8 @@ from robosynapse.common.grippers.inspire_rh5dg2 import protocol as rh5dg2_protoc
 from robosynapse.common.grippers.tesollo_dg5f import protocol as dg5f_protocol
 from robosynapse.common.teleop.dexpilot_retarget import DexPilotRetarget
 
+from prior import PriorDexPilot, dg5f_human_angles, dg5f_joint_finger
+
 # profile.teleop.dex.dexpilot 와 같은 키. rh5dg2 값은 robots/ur7/profile.py 그대로.
 HANDS = {
     "dg5f": {
@@ -35,6 +37,9 @@ HANDS = {
         "knuckle_links": {"index": "rl_dg_2_2", "middle": "rl_dg_3_2", "ring": "rl_dg_4_2",
                           "little": "rl_dg_5_3"},
         "wire_names": {j: n for n, j, _lo, _hi in dg5f_protocol.DOF_SPECS},   # urdf joint → thumb1…
+        # 굽힘 3관절 독립 구동 → 사람 관절각 사전항이 의미 있음 (prior.py)
+        "angle_fn": dg5f_human_angles,
+        "finger_of": dg5f_joint_finger,
     },
     "rh5dg2": {
         "label": "Inspire RH5DG2 (13-DOF, 실기 매핑)",
@@ -51,9 +56,12 @@ HANDS = {
 
 # profile.teleop.dex.dexpilot 기본(ur7) — UI 가 덮어쓴다.
 DEFAULT_KNOBS = {"scale": 1.0, "bone_scale": True, "project_dist": 0.03, "escape_dist": 0.05,
-                 "filter": {"min_cutoff": 1.0, "beta": 0.05, "d_cutoff": 1.0}}
+                 "filter": {"min_cutoff": 1.0, "beta": 0.05, "d_cutoff": 1.0}, "angle_prior": 0.0,
+                 "pinch_scale": 1.0}
 KNOB_KEYS = ("scale", "bone_scale", "project_dist", "escape_dist", "eta1", "eta2",
              "huber_delta", "norm_delta", "filter", "out_smooth", "maxiter")
+# robo-viz 전용(robo-synapse DexPilot 에 없는) 노브 — prior.py
+EXTRA_KEYS = ("angle_prior", "pinch_scale")
 
 
 def urdf_joints(urdf: Path) -> dict:
@@ -103,11 +111,18 @@ def dof_space(hand: str, locks: dict | None = None):
 
 def build(hand: str, knobs: dict | None = None, locks: dict | None = None,
           control_hand: str = "right") -> DexPilotRetarget:
+    """angle_prior = 0(기본) 또는 손에 angle_fn 이 없으면 robo-synapse DexPilotRetarget 그대로."""
     cfg = HANDS[hand]
-    k = dict(DEFAULT_KNOBS)
-    k.update({kk: v for kk, v in (knobs or {}).items() if kk in KNOB_KEYS})
+    knobs = knobs or {}
+    merged = {**DEFAULT_KNOBS, **knobs}
+    k = {kk: v for kk, v in merged.items() if kk in KNOB_KEYS}
     limits, jmap = dof_space(hand, locks)
-    return DexPilotRetarget(limits, urdf=str(cfg["urdf"]), joint_map=jmap,
-                            base_link=cfg["base_link"], tip_links=cfg["tip_links"],
-                            knuckle_links=cfg["knuckle_links"], hand=control_hand,
-                            min_step_deg=0.0, **k)
+    common = dict(urdf=str(cfg["urdf"]), joint_map=jmap, base_link=cfg["base_link"],
+                  tip_links=cfg["tip_links"], knuckle_links=cfg["knuckle_links"],
+                  hand=control_hand, min_step_deg=0.0, **k)
+    lam = float(merged.get("angle_prior") or 0.0)
+    if lam > 0 and cfg.get("angle_fn") is not None:
+        return PriorDexPilot(limits, angle_prior=lam, angle_fn=cfg["angle_fn"],
+                             finger_of=cfg.get("finger_of"),
+                             pinch_scale=float(merged.get("pinch_scale", 1.0)), **common)
+    return DexPilotRetarget(limits, **common)

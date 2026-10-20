@@ -25,6 +25,7 @@ from aiohttp import WSMsgType, web
 
 import hands
 import synth
+from tesollo_map import TesolloMap
 
 HERE = pathlib.Path(__file__).resolve().parent
 STATIC = HERE / "static"
@@ -52,6 +53,8 @@ class Live:
                                        key=str(key) if have else None,
                                        control_hand="right",
                                        public_host=_cert_host(cert) if have else None)
+            # 토큰 고정: 서버를 재시작해도 헤드셋 주소(북마크)가 그대로이게 파일에 둔다
+            self.src.token = _persistent_token()
             # 헤드셋 뼈대 색: 리타겟 검증 중엔 "추종 중"(파랑/초록)으로 고정
             self.src.state_fn = lambda: {"live": True, "engaged": True, "engages": 1,
                                          "overlay": True}
@@ -74,6 +77,28 @@ class Live:
         return None if f is None or f.keypoints is None else np.asarray(f.keypoints, float)
 
 
+TOKEN_FILE = pathlib.Path.home() / ".config/robo-viz/xr_token"
+
+
+def _persistent_token() -> str:
+    """8013 접근 토큰 — 처음 한 번 만들어 ~/.config/robo-viz/xr_token(600)에 두고 재사용.
+    지우면 다음 시작 때 새로 만든다(주소가 바뀜)."""
+    import os
+    import secrets
+    try:
+        t = TOKEN_FILE.read_text().strip()
+        if len(t) >= 16:
+            return t
+    except OSError:
+        pass
+    TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
+    t = secrets.token_urlsafe(16)
+    fd = os.open(TOKEN_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(t + "\n")
+    return t
+
+
 def _cert_host(cert: pathlib.Path):
     try:
         out = subprocess.run(["openssl", "x509", "-in", str(cert), "-noout", "-subject"],
@@ -92,6 +117,9 @@ class Session:
         self.locks: dict = {}
         self.source = {"kind": "preset", "name": "open"}
         self.rt = None
+        self.tm = None                         # Tesollo 공식 Manus 매핑(dg5f 만)
+        self.backend = "dexpilot"              # 메인 손: "dexpilot" | "tesollo"
+        self.compare = False                   # 다른 방식 손을 옆에 같이
         self.err = ""
         self.rec: list | None = None           # [(t, kp)] 녹화 중이면 list
         self.replay = None                     # (t[], kp[], t0)
@@ -100,6 +128,14 @@ class Session:
     def rebuild(self):
         try:
             self.rt = hands.build(self.hand, self.knobs, self.locks)
+            self.tm = None
+            if self.hand == "dg5f":
+                lim = {j: (min(a, b), max(a, b)) for _d, j, a, b in hands.dof_space(self.hand)[1]}
+                self.tm = TesolloMap(lim, calib=bool(self.knobs.get("tesollo_calib", True)),
+                                     thumb_in_off=float(self.knobs.get("thumb_in_off", 0.0)),
+                                     thumb_elev0=float(self.knobs.get("thumb_elev0", 15.0)),
+                                     filter=(self.knobs.get("filter")
+                                             or hands.DEFAULT_KNOBS["filter"]))
             self.err = ""
         except Exception as e:                 # 설정 오류는 화면에 띄우고 이전 rt 유지 안 함
             self.rt = None
@@ -138,20 +174,38 @@ class Session:
             out["nokp"] = True
             return out
         rt = self.rt
+        names = [j for _, j, *_ in rt._map]
         t0 = time.perf_counter()
         filtered = self.source["kind"] in ("live", "replay")
-        q = rt._step(kp, filtered=filtered)
+        q_dp = rt._step(kp, filtered=filtered)       # 항상 돈다(warm start·투영 상태 유지)
         ms = (time.perf_counter() - t0) * 1e3
-        if q is None:
+        if q_dp is None:
             out["nokp"] = True
             return out
+        q_t = None
+        if self.tm is not None:
+            d = self.tm(kp, filtered=filtered)
+            if d is not None and self.knobs.get("tesollo_thumb_dp", True):
+                # 엄지는 DexPilot 해를 쓴다: 각도 대응만으로는 대립(손바닥 가로지르기)이 안 나온다
+                # (Quest 에서 대립 중 손바닥 평면 안 벌림각이 0 근처로 무너져 thumb1 이 작아짐)
+                for n, v in zip(names, q_dp):
+                    if n.startswith("rj_dg_1_"):
+                        d[n] = float(v)
+            q_t = None if d is None else np.array([d[n] for n in names])
+            out["ergo"] = {k: round(v, 1) for k, v in self.tm.ergo.items()}
+        use_t = self.backend == "tesollo" and q_t is not None
+        q = q_t if use_t else q_dp
+        other = q_dp if use_t else q_t
+        out["backend"] = "tesollo" if use_t else "dexpilot"
+        if self.compare and other is not None:
+            out["q_ghost"] = {n: float(v) for n, v in zip(names, other)}
+            out["ghost_backend"] = "dexpilot" if use_t else "tesollo"
         P, _ = rt.chain.fk(q, jac=False)
         tips_r = P[:rt._n_tip]
         targets = rt.to_robot(kp)                                    # [root, tips…]
         # 사람 손 전체(25점)를 같은 손 프레임으로 — 표시용(뼈길이 정규화 전, 손 단위 scale)
         root_h, R_h = rt.human_frame(kp)
         skel = rt._to_hand_frame(kp - root_h, R_h) @ rt._R_r.T * rt.scale + rt._root_r
-        names = [j for _, j, *_ in rt._map]
         lo, hi = rt._lo, rt._hi
         at_lim = [n for n, v, a, b in zip(names, q, lo, hi) if b - a > 1e-6 and
                   (v - a < np.radians(0.5) or b - v < np.radians(0.5))]
@@ -181,6 +235,8 @@ class Session:
             self.hand = m.get("hand", self.hand)
             self.knobs = m.get("knobs", self.knobs)
             self.locks = {k: float(v) for k, v in (m.get("locks") or {}).items()}
+            self.backend = m.get("backend", self.backend)
+            self.compare = bool(m.get("compare", self.compare))
             self.rebuild()
         elif t == "source":
             self.source = {k: v for k, v in m.items() if k != "type"}
@@ -191,6 +247,8 @@ class Session:
                 self.replay = (d["t"] - d["t"][0], d["kp"], time.monotonic())
             if self.rt is not None:
                 self.rt.reset()
+            if self.tm is not None:
+                self.tm.reset()
         elif t == "record":
             if m.get("on"):
                 self.rec = []
@@ -216,6 +274,8 @@ def hand_info() -> dict:
             "label": cfg["label"], "urdf": f"/desc/{name}/{pathlib.Path(cfg['urdf']).name}",
             "base_link": cfg["base_link"], "tip_links": cfg["tip_links"],
             "knuckle_links": cfg["knuckle_links"],
+            "angle_prior": cfg.get("angle_fn") is not None,
+            "tesollo": name == "dg5f",
             "joints": hands.urdf_joints(pathlib.Path(cfg["urdf"])),
             "dofs": [{"dof": d, "joint": j, "lo": min(a, b), "hi": max(a, b),
                       "wire": cfg.get("wire_names", {}).get(j, d)} for d, j, a, b in jmap],
