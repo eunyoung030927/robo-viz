@@ -17,7 +17,7 @@ bash run.sh
 |---|---|
 | 합성 프리셋 | open / fist / half / spread / pinch_{index,middle,ring,little} (`synth.py`) |
 | 합성 슬라이더 | 손가락별 굽힘·벌림, 엄지 들기·굽힘·스윙 |
-| Quest 실시간 | robo-synapse `WebXRHandSource` 를 **8013** 에 따로 띄운다(webctl 8012 와 무관). 패널에 뜬 `https://ro1-…ts.net:8013/?k=…` 를 헤드셋에서 열고 Pass-through. 오른손만 사용. 토큰은 서버 재시작마다 바뀜 |
+| Quest 실시간 | robo-synapse `WebXRHandSource` 를 **8013** 에 따로 띄운다(webctl 8012 와 무관). 패널에 뜬 `https://ro1-…ts.net:8013/?k=…` 를 헤드셋에서 열고 Pass-through. 오른손만 사용. 토큰은 `~/.config/robo-viz/xr_token` 에 고정(재시작해도 주소 같음 — 헤드셋 북마크) |
 | 녹화 재생 | Quest 입력 중 `● 녹화` → `recordings/YYMMDD_HHMMSS.npz` (t, kp[N,25,3]) 를 반복 재생 |
 | 실물 손 (읽기만) | 실물 DG-5F 관절각을 Modbus FC04 로 읽기만 해서 URDF 에 그대로(손에 명령 0). webctl 이 손을 잡고 있으면 webctl `/status` 경유(~5 s). 범위 측정(최소/최대 → `recordings/dg5f_ranges_*.json`) |
 
