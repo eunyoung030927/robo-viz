@@ -81,6 +81,8 @@
     <div class="muted">실물 DG-5F 관절각을 <b>읽기만</b> 해서(손에 명령 0) 변환 없이 URDF 에 그대로 띄운다 — 와이어°=URDF° 확인용.
       손을 webctl 이 잡고 있으면 webctl 값을 대신 읽는다(갱신 ~5초). 손가락을 손으로 움직여 화면과 같은 방향인지 볼 것.</div>
     <div class="row"><span id="realstat" class="muted">-</span></div>
+    <div class="row"><b>범위 측정</b><button id="realreset">최소/최대 초기화</button><button id="realsave">JSON 저장</button><span id="realsaved" class="muted"></span></div>
+    <div class="muted">초기화 → 관절마다 손으로 양쪽 끝(멈추는 곳)까지 천천히 밀었다 놓기 → 저장. 측정 칸이 URDF·매뉴얼보다 넓으면 주황.</div>
     <table id="realtbl"></table>
   </div>
 
@@ -296,6 +298,7 @@ function connect() {
     if (m.type === 'frame') onFrame(m);
     else if (m.type === 'live') { if (!m.ok) showErr('Quest 서버: ' + m.error); }
     else if (m.type === 'saved') { $('recstat').textContent = m.file ? `저장: ${m.file} (${m.frames} 프레임)` : '프레임 없음 — 저장 안 함'; refreshRecordings(); }
+    else if (m.type === 'real_saved') $('realsaved').textContent = '저장: ' + m.file;
     else if (m.type === 'error') showErr(m.error);
   };
 }
@@ -355,8 +358,10 @@ function onReal(f) {
   if (overlay) overlay.children.slice().forEach(o => overlay.remove(o));
   const bad = f.real_rows.filter(r => r.out_urdf).length, badm = f.real_rows.filter(r => r.out_manual).length;
   $('hud').innerHTML = `<b>실물 미러</b> (와이어° → URDF° 변환 없음) · URDF 범위 밖 <b style="color:${bad ? 'var(--warn)' : 'var(--ok)'}">${bad}</b>개 · 매뉴얼 범위 밖 <b>${badm}</b>개`;
-  $('realtbl').innerHTML = '<tr><th>DOF</th><th>실물°</th><th>URDF 범위</th><th>매뉴얼 범위</th></tr>' + f.real_rows.map(r =>
+  const wide = (m, b) => m && (m[0] < b[0] - 2 || m[1] > b[1] + 2);
+  $('realtbl').innerHTML = '<tr><th>DOF</th><th>실물°</th><th>측정 최소..최대</th><th>URDF 범위</th><th>매뉴얼 범위</th></tr>' + f.real_rows.map(r =>
     `<tr><td title="${r.joint}">${r.dof}</td><td>${r.deg.toFixed(1)}</td>
+     <td style="color:${wide(r.meas, r.urdf) || wide(r.meas, r.manual) ? 'var(--warn)' : 'inherit'}">${r.meas ? r.meas[0].toFixed(1) + '..' + r.meas[1].toFixed(1) : '-'}</td>
      <td style="color:${r.out_urdf ? 'var(--warn)' : 'inherit'}">${r.urdf[0].toFixed(0)}..${r.urdf[1].toFixed(0)}</td>
      <td style="color:${r.out_manual ? 'var(--warn)' : 'inherit'}">${r.manual[0].toFixed(0)}..${r.manual[1].toFixed(0)}</td></tr>`).join('');
 }
@@ -481,6 +486,8 @@ async function init() {
     send({ type: 'record', on });
   };
   $('recsel').onchange = sendSource;
+  $('realreset').onclick = () => { send({ type: 'real_reset' }); $('realsaved').textContent = ''; };
+  $('realsave').onclick = () => send({ type: 'real_save' });
   $('recrefresh').onclick = refreshRecordings;
   $('opacity').value = S.opacity; $('opacityv').textContent = S.opacity;
   $('opacity').oninput = () => { S.opacity = +$('opacity').value; $('opacityv').textContent = S.opacity; save();

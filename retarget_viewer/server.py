@@ -188,7 +188,9 @@ class Session:
         for name, j, mlo, mhi in P.DOF_SPECS:
             v = deg[name]
             lo, hi = np.degrees(urdf[j]["lower"]), np.degrees(urdf[j]["upper"])
+            mm = REAL.minmax.get(name)
             rows.append({"dof": name, "joint": j, "deg": v, "urdf": [lo, hi], "manual": [mlo, mhi],
+                         "meas": mm and [mm[0], mm[1]],
                          "out_urdf": bool(v < lo - 2 or v > hi + 2),
                          "out_manual": bool(v < mlo - 2 or v > mhi + 2)})
         out.update({"q": {r["joint"]: float(np.radians(r["deg"])) for r in rows}, "real_rows": rows})
@@ -294,6 +296,22 @@ class Session:
                              kp=np.stack([r[1] for r in self.rec]))
                 n, self.rec = len(self.rec), None
                 return {"type": "saved", "file": name if n else None, "frames": n}
+        elif t == "real_reset":
+            REAL.reset_minmax()
+        elif t == "real_save":
+            from robosynapse.common.grippers.tesollo_dg5f import protocol as P
+            RECORDINGS.mkdir(exist_ok=True)
+            name = "dg5f_ranges_" + time.strftime("%y%m%d_%H%M%S") + ".json"
+            urdf = hands.urdf_joints(hands.HANDS["dg5f"]["urdf"])
+            data = {"note": "실물 DG-5F 관절 범위 실측(손으로 끝까지 밀어 기록, 와이어°=URDF°)",
+                    "via": REAL.via, "info": REAL.info,
+                    "joints": {n: {"urdf_joint": j, "measured_deg": REAL.minmax.get(n),
+                                   "manual_deg": [lo, hi],
+                                   "urdf_deg": [round(float(np.degrees(urdf[j]["lower"])), 1),
+                                                round(float(np.degrees(urdf[j]["upper"])), 1)]}
+                               for n, j, lo, hi in P.DOF_SPECS}}
+            (RECORDINGS / name).write_text(json.dumps(data, ensure_ascii=False, indent=1))
+            return {"type": "real_saved", "file": str(RECORDINGS / name)}
         elif t == "reset" and self.rt is not None:
             self.rt.reset()
         return None

@@ -34,6 +34,7 @@ class RealHand:
         self._thread = None
         self._stop = threading.Event()
         self.deg = None            # {DOF name: deg}
+        self.minmax = {}           # {DOF name: [min, max]} — 범위 측정(초기화 전까지 누적)
         self.t = 0.0
         self.via = ""              # "modbus" | "webctl" | ""
         self.info = ""             # product / firmware / armed 등
@@ -53,6 +54,19 @@ class RealHand:
             self._users = max(0, self._users - 1)
             if self._users == 0:
                 self._stop.set()
+
+    def _update(self, deg: dict):
+        self.deg = deg
+        self.t = time.monotonic()
+        for n, v in deg.items():
+            mm = self.minmax.get(n)
+            if mm is None:
+                self.minmax[n] = [v, v]
+            else:
+                mm[0], mm[1] = min(mm[0], v), max(mm[1], v)
+
+    def reset_minmax(self):
+        self.minmax = {}
 
     def snapshot(self) -> dict:
         age = time.monotonic() - self.t if self.t else None
@@ -95,8 +109,7 @@ class RealHand:
         try:
             while not self._stop.is_set():
                 raw = link.read_input(IR_POS, P.N_DOF)
-                self.deg = {n: v / 10.0 for n, v in zip(P.DOF_NAMES, raw)}
-                self.t = time.monotonic()
+                self._update({n: v / 10.0 for n, v in zip(P.DOF_NAMES, raw)})
                 time.sleep(1.0 / DIRECT_HZ)
         except Exception as e:
             self.err = f"직접 읽기 끊김: {type(e).__name__}: {e}"
@@ -117,8 +130,7 @@ class RealHand:
                     self.err = f"webctl dexhand 관절 {len(vals)}개 — DG-5F 가 webctl 에 연결돼 있나?"
                     time.sleep(1.0)
                     continue
-                self.deg = dict(zip(P.DOF_NAMES, (float(v) for v in vals)))
-                self.t = time.monotonic()
+                self._update(dict(zip(P.DOF_NAMES, (float(v) for v in vals))))
                 self.via = "webctl"
                 self.info = (f"{st.get('model', '?')} · armed={st.get('armed')} · "
                              f"fwRun={st.get('fwRun')} · {st.get('note', '')}")

@@ -1,5 +1,9 @@
 """손별 리타겟팅 설정 + robo-synapse `DexPilotRetarget` 생성.
 
+2026-10-20 갱신: dg5f 는 이제 **실기 텔레옵과 같은 범위**를 쓴다 — 드라이버 범위(protocol.limits(),
+와이어°=URDF° 항등) + robo-synapse 프로필의 텔레옵 bounds_deg(feat/dg5f-dexpilot-teleop).
+아래 "URDF 한계" 설명은 그 이전 기록.
+
 알고리즘은 robo-synapse 것을 **import 해서 그대로** 쓴다(복사·재구현 금지) — 웹에서 본
 결과가 실기에서 도는 코드의 결과와 같아야 검증 의미가 있다.
 
@@ -27,7 +31,7 @@ from prior import PriorDexPilot, dg5f_human_angles, dg5f_joint_finger
 # profile.teleop.dex.dexpilot 와 같은 키. rh5dg2 값은 robots/ur7/profile.py 그대로.
 HANDS = {
     "dg5f": {
-        "label": "Tesollo DG-5F (20-DOF, URDF 한계)",
+        "label": "Tesollo DG-5F (20-DOF, 실기 범위)",
         "desc_dir": dg5f_protocol.DESCRIPTION_DIR,
         "urdf": dg5f_protocol.DESCRIPTION_URDF,
         "base_link": "rl_dg_palm",
@@ -91,13 +95,10 @@ def dof_space(hand: str, locks: dict | None = None):
         limits = {n: (lo / 10.0, hi / 10.0) for n, lo, hi in rh5dg2_protocol.DOF_SPECS}
         jmap = [tuple(r) for r in rh5dg2_model.WIRE2URDF]
     else:
-        limits, jmap = {}, []
-        for j, info in urdf_joints(cfg["urdf"]).items():
-            if info["type"] != "revolute" or info["mimic"]:
-                continue
-            lo, hi = info["lower"], info["upper"]
-            limits[j] = (math.degrees(lo), math.degrees(hi))
-            jmap.append((j, j, lo, hi))
+        # 실기와 같게: 드라이버 범위(dof_limits = protocol.limits()) + 항등 맵(드라이버 urdf_joint_map)
+        limits = dg5f_protocol.limits()
+        jmap = [(n, j, math.radians(limits[n][0]), math.radians(limits[n][1]))
+                for n, j, _lo, _hi in dg5f_protocol.DOF_SPECS]
     if locks:
         by_joint = {r[1]: i for i, r in enumerate(jmap)}
         for j, v in locks.items():
@@ -107,6 +108,17 @@ def dof_space(hand: str, locks: dict | None = None):
             v = min(max(float(v), min(lo, hi)), max(lo, hi))
             jmap[by_joint[j]] = (d, jj, v, v)
     return limits, jmap
+
+
+def teleop_bounds(hand: str):
+    """robo-synapse 프로필의 텔레옵 bounds_deg (dg5f 만; 없거나 구버전이면 None)."""
+    if hand != "dg5f":
+        return None
+    try:
+        from robosynapse.robots.ur7.profile import _DG5F_TELEOP_DEX
+        return dict(_DG5F_TELEOP_DEX["dexpilot"]["bounds_deg"])
+    except Exception:
+        return None
 
 
 def build(hand: str, knobs: dict | None = None, locks: dict | None = None,
@@ -120,6 +132,11 @@ def build(hand: str, knobs: dict | None = None, locks: dict | None = None,
     common = dict(urdf=str(cfg["urdf"]), joint_map=jmap, base_link=cfg["base_link"],
                   tip_links=cfg["tip_links"], knuckle_links=cfg["knuckle_links"],
                   hand=control_hand, min_step_deg=0.0, **k)
+    import inspect
+    b = teleop_bounds(hand)
+    if b and "bounds_deg" in inspect.signature(DexPilotRetarget.__init__).parameters:
+        locked = {d for d, j, *_ in jmap if j in (locks or {})}    # 고정 관절은 이미 한 점
+        common["bounds_deg"] = {d: v for d, v in b.items() if d not in locked}
     lam = float(merged.get("angle_prior") or 0.0)
     if lam > 0 and cfg.get("angle_fn") is not None:
         return PriorDexPilot(limits, angle_prior=lam, angle_fn=cfg["angle_fn"],

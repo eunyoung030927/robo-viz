@@ -19,6 +19,7 @@ bash run.sh
 | 합성 슬라이더 | 손가락별 굽힘·벌림, 엄지 들기·굽힘·스윙 |
 | Quest 실시간 | robo-synapse `WebXRHandSource` 를 **8013** 에 따로 띄운다(webctl 8012 와 무관). 패널에 뜬 `https://ro1-…ts.net:8013/?k=…` 를 헤드셋에서 열고 Pass-through. 오른손만 사용. 토큰은 서버 재시작마다 바뀜 |
 | 녹화 재생 | Quest 입력 중 `● 녹화` → `recordings/YYMMDD_HHMMSS.npz` (t, kp[N,25,3]) 를 반복 재생 |
+| 실물 손 (읽기만) | 실물 DG-5F 관절각을 Modbus FC04 로 읽기만 해서 URDF 에 그대로(손에 명령 0). webctl 이 손을 잡고 있으면 webctl `/status` 경유(~5 s). 범위 측정(최소/최대 → `recordings/dg5f_ranges_*.json`) |
 
 ## 화면
 - 회색 뼈대 = 사람 손(손 프레임으로 옮긴 것), 색 큰 점 = 리타겟 **목표**(뼈길이 정규화 후),
@@ -30,7 +31,7 @@ bash run.sh
 ## 손
 | 키 | DOF 공간 | 비고 |
 |---|---|---|
-| `dg5f` | **URDF 관절 그대로, URDF 한계** | 와이어°↔URDF rad 실측표가 아직 없음. URDF 한계 ≠ 실물(thumb1 상한 51 vs 77, little2 −24..35 vs −15..90 등) → 결과는 "URDF 한계 기준" |
+| `dg5f` | **실기 텔레옵과 같은 범위** — 드라이버 범위(`protocol.limits()`) + 와이어°=URDF° 항등 + robo-synapse 프로필 `bounds_deg` | 항등은 2026-10-20 실물 미러로 확인. 벤더 URDF 의 관절 **한계**는 실물과 다름(index1·ring1·little2·thumb1) — 그래서 URDF 한계는 안 쓴다 |
 | `rh5dg2` | 실기 매핑(드라이버 와이어 한계 + `model.WIRE2URDF`) | 실기에서 쓰는 경로와 동일 — 비교 기준 |
 
 링크 설정(base/tip/knuckle)은 `hands.py`. 이 값과 노브가 확정되면 robo-synapse
