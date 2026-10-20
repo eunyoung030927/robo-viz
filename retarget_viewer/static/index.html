@@ -1,0 +1,402 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Retarget Viewer</title>
+<style>
+  :root { --bg:#14171c; --panel:#1c2027; --line:#2c323c; --fg:#dfe4ea; --muted:#8a93a0; --acc:#4fa3ff;
+          --warn:#ffae42; --bad:#ff5d73; --ok:#58d68d; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:13px/1.4 system-ui, sans-serif; height:100vh; display:flex; }
+  #viewport { flex:1; position:relative; min-width:0; }
+  canvas { display:block; width:100%; height:100%; }
+  aside { width:400px; overflow-y:auto; background:var(--panel); border-left:1px solid var(--line); padding:10px 12px; }
+  h1 { font-size:15px; margin:0 0 6px; }
+  h2 { font-size:12px; text-transform:uppercase; letter-spacing:.05em; color:var(--muted); margin:14px 0 6px; border-top:1px solid var(--line); padding-top:10px; }
+  .row { display:flex; gap:6px; align-items:center; flex-wrap:wrap; margin:4px 0; }
+  .row label { color:var(--muted); min-width:92px; }
+  button, select { background:#262c35; color:var(--fg); border:1px solid var(--line); border-radius:4px; padding:3px 8px; font:inherit; cursor:pointer; }
+  button.on { background:var(--acc); color:#0b1220; border-color:var(--acc); }
+  button.rec { background:var(--bad); color:#fff; }
+  input[type=range] { flex:1; min-width:80px; }
+  .v { font-variant-numeric:tabular-nums; min-width:44px; text-align:right; color:var(--fg); }
+  table { width:100%; border-collapse:collapse; font-variant-numeric:tabular-nums; }
+  td, th { padding:1px 4px; border-bottom:1px solid #232831; text-align:right; }
+  th { color:var(--muted); font-weight:500; }
+  td:first-child, th:first-child { text-align:left; }
+  .bar { position:relative; height:8px; background:#262c35; border-radius:2px; min-width:80px; }
+  .bar i { position:absolute; top:0; bottom:0; width:3px; background:var(--acc); }
+  .lim td { color:var(--warn); }
+  .muted { color:var(--muted); }
+  .err { color:var(--bad); white-space:pre-wrap; }
+  .url { word-break:break-all; background:#11141a; padding:4px 6px; border-radius:4px; user-select:all; }
+  #hud { position:absolute; left:10px; top:8px; font-size:12px; color:var(--muted); pointer-events:none; }
+  #hud b { color:var(--fg); }
+  .sw { display:inline-block; width:10px; height:10px; border-radius:2px; margin-right:3px; vertical-align:-1px; }
+  details summary { cursor:pointer; color:var(--muted); }
+</style>
+</head>
+<body>
+<div id="viewport"><canvas id="c"></canvas><div id="hud"></div></div>
+<aside>
+  <h1>Retarget Viewer <span class="muted" style="font-weight:400">· DexPilot (robo-synapse)</span></h1>
+  <div class="muted">로봇에는 아무것도 보내지 않습니다. 사람 손 → 리타겟 → URDF 표시만.</div>
+  <div id="err" class="err"></div>
+
+  <h2>손</h2>
+  <div class="row"><select id="hand"></select><button id="reset">warm start 리셋</button></div>
+  <div id="handnote" class="muted"></div>
+
+  <h2>입력</h2>
+  <div class="row" id="srcbtns">
+    <button data-src="preset" class="on">합성 프리셋</button>
+    <button data-src="synth">합성 슬라이더</button>
+    <button data-src="live">Quest 실시간</button>
+    <button data-src="replay">녹화 재생</button>
+  </div>
+  <div id="src-preset" class="row"></div>
+  <div id="src-synth"></div>
+  <div id="src-live">
+    <div class="row"><span id="livestat" class="muted">-</span></div>
+    <div class="url" id="liveurl" hidden></div>
+    <div class="row"><button id="recbtn">● 녹화</button><span id="recstat" class="muted"></span></div>
+  </div>
+  <div id="src-replay" class="row"><select id="recsel"></select><button id="recrefresh">새로고침</button></div>
+
+  <h2>리타겟 노브 <span class="muted">(profile.teleop.dex.dexpilot)</span></h2>
+  <div id="knobs"></div>
+
+  <h2>관절 고정 <span class="muted">(최적화 범위를 한 점으로)</span></h2>
+  <div id="locks"></div>
+
+  <h2>표시</h2>
+  <div class="row" id="disp"></div>
+  <div class="row"><label>로봇 투명도</label><input type="range" id="opacity" min="0.15" max="1" step="0.05" value="0.85"><span class="v" id="opacityv"></span></div>
+  <div class="row"><button data-cam="palm">손바닥</button><button data-cam="side">옆</button><button data-cam="back">손등</button><button data-cam="top">위</button></div>
+
+  <h2>손끝</h2>
+  <table id="tips"></table>
+  <h2>손끝 쌍 (엄지–손가락 = s1)</h2>
+  <table id="pairs"></table>
+  <h2>관절 <span class="muted">(URDF °, 막대 = 최적화 범위 안 위치)</span></h2>
+  <table id="joints"></table>
+</aside>
+
+<script type="importmap">
+{ "imports": {
+  "three": "/static/vendor/three.module.js",
+  "three/examples/jsm/loaders/STLLoader.js": "/static/vendor/jsm/loaders/STLLoader.js",
+  "three/examples/jsm/loaders/ColladaLoader.js": "/static/vendor/jsm/loaders/ColladaLoader.js",
+  "three/examples/jsm/controls/OrbitControls.js": "/static/vendor/jsm/controls/OrbitControls.js",
+  "urdf-loader": "/static/vendor/urdf/URDFLoader.js"
+} }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
+import { STLLoader } from 'three/examples/jsm/loaders/STLLoader.js';
+import { ColladaLoader } from 'three/examples/jsm/loaders/ColladaLoader.js';
+import URDFLoader from 'urdf-loader';
+
+const $ = id => document.getElementById(id);
+const FINGERS = ['thumb', 'index', 'middle', 'ring', 'little'];
+const FCOL = { thumb: 0xff5d73, index: 0xffae42, middle: 0x58d68d, ring: 0x38d7ff, little: 0xc58cff };
+const hex = c => '#' + c.toString(16).padStart(6, '0');
+// WebXR 25관절 뼈 (joint 0 손목은 vuer 규약상 다른 좌표계라 그리지 않는다)
+const BONES = [[1,2],[2,3],[3,4], [5,6],[6,7],[7,8],[8,9], [10,11],[11,12],[12,13],[13,14],
+               [15,16],[16,17],[17,18],[18,19], [20,21],[21,22],[22,23],[23,24], [6,11],[11,16],[16,21]];
+const KP_FINGER = i => i <= 4 ? 'thumb' : FINGERS[1 + Math.floor((i - 5) / 5)];
+
+// ------------------------------------------------------------------ 상태
+const STORE = 'retargetViewer.v1';
+const S = { hand: 'dg5f', src: 'preset', preset: 'open', knobs: null, locks: {}, synth: null,
+            show: { skeleton: true, targets: true, tips: true, errlines: true, pairs: true, axes: false },
+            opacity: 0.85, cam: 'palm' };
+try { Object.assign(S, JSON.parse(localStorage.getItem(STORE) || '{}')); } catch (e) {}
+const save = () => { try { localStorage.setItem(STORE, JSON.stringify(S)); } catch (e) {} };
+let INFO = null, robot = null, overlay = null, last = null, loadTok = 0;
+
+// ------------------------------------------------------------------ three
+const canvas = $('c');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.setClearColor(0x14171c);
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(35, 1, 0.005, 20);
+const controls = new OrbitControls(camera, canvas);
+controls.enableDamping = true;
+scene.add(new THREE.HemisphereLight(0xe8eeff, 0x30343c, 1.1));
+const key = new THREE.DirectionalLight(0xffffff, 1.4); key.position.set(0.4, 0.8, 0.6); scene.add(key);
+const fill = new THREE.DirectionalLight(0xbcd2ff, 0.5); fill.position.set(-0.6, 0.1, -0.5); scene.add(fill);
+const pivot = new THREE.Group(); pivot.rotation.x = -Math.PI / 2; scene.add(pivot);   // URDF Z-up → three Y-up
+const grid = new THREE.GridHelper(0.6, 12, 0x2c323c, 0x22262d); grid.position.y = -0.12; scene.add(grid);
+function resize() {
+  const r = $('viewport').getBoundingClientRect();
+  renderer.setSize(r.width, r.height, false);
+  camera.aspect = r.width / Math.max(1, r.height); camera.updateProjectionMatrix();
+}
+new ResizeObserver(resize).observe($('viewport')); resize();
+(function loop() { requestAnimationFrame(loop); controls.update(); renderer.render(scene, camera); })();
+
+// ------------------------------------------------------------------ 로봇 로드
+function loadRobot() {
+  const h = INFO.hands[S.hand], tok = ++loadTok;
+  const manager = new THREE.LoadingManager();
+  const loader = new URDFLoader(manager);
+  const stl = new STLLoader(manager), dae = new ColladaLoader(manager);
+  loader.loadMeshCb = (path, mgr, done) => {
+    const ext = path.split('.').pop().toLowerCase();
+    if (ext === 'stl') stl.load(path, g => done(new THREE.Mesh(g, new THREE.MeshStandardMaterial())), undefined, e => done(null, e));
+    else if (ext === 'dae') dae.load(path, c => done(c.scene), undefined, e => done(null, e));
+    else done(null, new Error('mesh 형식 미지원: ' + path));
+  };
+  let pending = null;
+  manager.onLoad = () => { if (pending && tok === loadTok) { setupRobot(pending); pending = null; } };
+  loader.load(h.urdf, r => { pending = r; }, undefined, e => showErr('URDF 로드 실패: ' + e));
+}
+function setupRobot(r) {
+  if (robot) { pivot.remove(robot); robot.traverse(o => { o.geometry?.dispose(); }); }
+  robot = r; pivot.add(robot);
+  robot.traverse(o => {
+    if (!o.isMesh) return;
+    o.material = new THREE.MeshStandardMaterial({ color: 0xb8bec8, roughness: 0.55, metalness: 0.05,
+                                                  transparent: true, opacity: S.opacity, side: THREE.DoubleSide });
+  });
+  colorFingers();
+  const h = INFO.hands[S.hand];
+  overlay = new THREE.Group();
+  robot.links[h.base_link].add(overlay);
+  setCam(S.cam);
+}
+function colorFingers() {           // 손끝 링크까지의 체인을 손가락 색으로 옅게
+  const h = INFO.hands[S.hand];
+  for (const f of FINGERS) {
+    let o = robot.links[h.tip_links[f]];
+    const c = new THREE.Color(FCOL[f]).lerp(new THREE.Color(0xb8bec8), 0.6);
+    while (o && o !== robot.links[h.base_link] && o !== robot) {
+      if (o.isURDFLink) o.children.forEach(ch => { if (ch.isURDFVisual) ch.traverse(m => { if (m.isMesh) m.material.color.copy(c); }); });
+      o = o.parent;
+    }
+  }
+}
+function setCam(v) {
+  S.cam = v; save();
+  if (!robot) return;
+  const box = new THREE.Box3().setFromObject(robot), c = box.getCenter(new THREE.Vector3());
+  const d = box.getSize(new THREE.Vector3()).length() * 1.6;
+  // base 프레임 축을 월드로: 손바닥 법선이 어디냐는 손마다 다르니 base_link 의 회전에서 뽑는다
+  const base = robot.links[INFO.hands[S.hand].base_link];
+  const q = base.getWorldQuaternion(new THREE.Quaternion());
+  const ax = i => new THREE.Vector3(...[[1,0,0],[0,1,0],[0,0,1]][i]).applyQuaternion(q);
+  const dirs = { palm: ax(0).clone().multiplyScalar(1), back: ax(0).clone().multiplyScalar(-1),
+                 side: ax(1), top: ax(2) };
+  const dir = (dirs[v] || dirs.palm).normalize();
+  camera.position.copy(c).addScaledVector(dir, d);
+  camera.up.copy(v === 'top' ? ax(0) : ax(2));
+  controls.target.copy(c); controls.update();
+}
+
+// ------------------------------------------------------------------ 오버레이
+const mats = {};
+const mat = (c, o = 1) => mats[c + ':' + o] ||= new THREE.MeshBasicMaterial({ color: c, transparent: o < 1, opacity: o, depthTest: false });
+const lmat = (c, o = 1) => mats['l' + c + ':' + o] ||= new THREE.LineBasicMaterial({ color: c, transparent: true, opacity: o, depthTest: false });
+const sph = new THREE.SphereGeometry(1, 14, 10);
+function dot(p, r, c, o) { const m = new THREE.Mesh(sph, mat(c, o)); m.position.fromArray(p); m.scale.setScalar(r); m.renderOrder = 10; return m; }
+function seg(a, b, c, o) {
+  const g = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(...a), new THREE.Vector3(...b)]);
+  const l = new THREE.Line(g, lmat(c, o)); l.renderOrder = 9; return l;
+}
+function drawOverlay(f) {
+  if (!overlay) return;
+  overlay.children.slice().forEach(o => { overlay.remove(o); o.geometry?.dispose?.(); });
+  const sh = S.show;
+  if (sh.axes) overlay.add(new THREE.AxesHelper(0.05));
+  if (sh.skeleton) {
+    for (const [a, b] of BONES) overlay.add(seg(f.skeleton[a], f.skeleton[b], a >= 5 && b - a === 5 ? 0x5b6475 : FCOL[KP_FINGER(b)], 0.55));
+    for (let i = 1; i < 25; i++) overlay.add(dot(f.skeleton[i], 0.0028, 0x8a93a0, 0.7));
+  }
+  f.fingers.forEach((fi, i) => {
+    if (sh.targets) overlay.add(dot(f.targets[i], 0.0055, FCOL[fi], 0.95));
+    if (sh.tips) { const m = dot(f.robot_tips[i], 0.0045, 0xffffff, 1); overlay.add(m); }
+    if (sh.errlines) overlay.add(seg(f.targets[i], f.robot_tips[i], FCOL[fi], 0.9));
+  });
+  if (sh.pairs) for (const p of f.pairs) if (p.proj) {
+    const a = f.fingers.indexOf(p.a), b = f.fingers.indexOf(p.b);
+    overlay.add(seg(f.robot_tips[a], f.robot_tips[b], 0xffff66, 1));
+  }
+}
+
+// ------------------------------------------------------------------ 표
+function renderTables(f) {
+  $('tips').innerHTML = '<tr><th>손가락</th><th>목표–로봇 손끝 [mm]</th></tr>' +
+    f.fingers.map((fi, i) => `<tr><td><span class="sw" style="background:${hex(FCOL[fi])}"></span>${fi}</td>
+      <td style="color:${f.tip_err_mm[i] > 15 ? 'var(--warn)' : 'inherit'}">${f.tip_err_mm[i].toFixed(1)}</td></tr>`).join('');
+  $('pairs').innerHTML = '<tr><th>쌍</th><th>사람 mm</th><th>로봇 mm</th><th>투영</th></tr>' +
+    f.pairs.filter(p => p.a === 'thumb' || p.proj).map(p =>
+      `<tr><td>${p.a}–${p.b}</td><td>${p.human_mm.toFixed(0)}</td><td>${p.robot_mm.toFixed(0)}</td><td>${p.proj ? '●' : ''}</td></tr>`).join('');
+  const h = INFO.hands[S.hand], lim = new Set(f.at_limit);
+  $('joints').innerHTML = '<tr><th>DOF</th><th>URDF°</th><th></th><th>범위°</th></tr>' + h.dofs.map(d => {
+    const v = f.q[d.joint]; if (v === undefined) return '';
+    const lo = d.lo, hi = d.hi, frac = hi > lo ? (v - lo) / (hi - lo) : 0.5;
+    const locked = d.joint in S.locks;
+    return `<tr class="${lim.has(d.joint) ? 'lim' : ''}"><td title="${d.joint}">${d.wire}${locked ? ' 🔒' : ''}</td>
+      <td>${(v * 180 / Math.PI).toFixed(1)}</td>
+      <td><div class="bar"><i style="left:calc(${(frac * 100).toFixed(1)}% - 1px)"></i></div></td>
+      <td class="muted">${(lo * 180 / Math.PI).toFixed(0)}..${(hi * 180 / Math.PI).toFixed(0)}</td></tr>`;
+  }).join('');
+}
+
+// ------------------------------------------------------------------ 소켓
+let ws = null;
+function connect() {
+  ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`);
+  ws.onopen = () => { sendConfig(); sendSource(); };
+  ws.onclose = () => { $('hud').innerHTML = '<b style="color:var(--bad)">서버 연결 끊김 — 재접속 중…</b>'; setTimeout(connect, 1500); };
+  ws.onmessage = ev => {
+    const m = JSON.parse(ev.data);
+    if (m.type === 'frame') onFrame(m);
+    else if (m.type === 'live') { if (!m.ok) showErr('Quest 서버: ' + m.error); }
+    else if (m.type === 'saved') { $('recstat').textContent = m.file ? `저장: ${m.file} (${m.frames} 프레임)` : '프레임 없음 — 저장 안 함'; refreshRecordings(); }
+    else if (m.type === 'error') showErr(m.error);
+  };
+}
+const send = o => ws && ws.readyState === 1 && ws.send(JSON.stringify(o));
+const sendConfig = () => send({ type: 'config', hand: S.hand, knobs: S.knobs, locks: S.locks });
+function sendSource() {
+  if (S.src === 'preset') send({ type: 'source', kind: 'preset', name: S.preset });
+  else if (S.src === 'synth') send({ type: 'source', kind: 'synth', params: S.synth });
+  else if (S.src === 'live') send({ type: 'source', kind: 'live' });
+  else if (S.src === 'replay' && $('recsel').value) send({ type: 'source', kind: 'replay', file: $('recsel').value });
+}
+function showErr(e) { $('err').textContent = e || ''; }
+function onFrame(f) {
+  showErr(f.err);
+  const L = f.live || {};
+  if (S.src === 'live') {
+    $('livestat').innerHTML = !L.started ? '서버 시작 중…' : L.connected
+      ? `<span style="color:var(--ok)">● 연결됨</span> ${L.fps} Hz` : '<span style="color:var(--warn)">● 헤드셋 대기</span> — 아래 주소를 헤드셋에서 열고 Pass-through';
+    $('liveurl').hidden = !L.url; $('liveurl').textContent = L.url || '';
+    if (L.err) showErr(L.err);
+  }
+  $('recstat').textContent = f.rec != null ? `녹화 중 ${f.rec} 프레임` : $('recstat').textContent;
+  if (!f.q) { $('hud').innerHTML = f.nokp ? '<b>손 프레임 없음</b> (추적 안 됨 / 대기)' : ''; return; }
+  last = f;
+  if (robot) {
+    for (const [j, v] of Object.entries(f.q)) robot.joints[j]?.setJointValue(v);
+  }
+  drawOverlay(f);
+  renderTables(f);
+  const proj = f.pairs.filter(p => p.proj).map(p => `${p.a}–${p.b}`).join(', ') || '-';
+  $('hud').innerHTML = `<b>${INFO.hands[S.hand].label}</b> · solve <b>${f.solve_ms.toFixed(1)} ms</b> · 투영 쌍 <b>${proj}</b>` +
+    (f.at_limit.length ? ` · <span style="color:var(--warn)">한계 ${f.at_limit.length}개</span>` : '') +
+    `<br><span class="sw" style="background:#8a93a0"></span>사람 손(손 프레임) <span class="sw" style="background:#ffae42"></span>목표(뼈길이 정규화) <span class="sw" style="background:#fff"></span>로봇 손끝 <span class="sw" style="background:#ffff66"></span>투영 접촉`;
+}
+
+// ------------------------------------------------------------------ UI
+function slider(parent, label, min, max, step, val, on, fmt = v => v) {
+  const row = document.createElement('div'); row.className = 'row';
+  row.innerHTML = `<label>${label}</label><input type="range" min="${min}" max="${max}" step="${step}" value="${val}"><span class="v">${fmt(val)}</span>`;
+  const inp = row.querySelector('input'), out = row.querySelector('.v');
+  inp.oninput = () => { out.textContent = fmt(+inp.value); on(+inp.value); };
+  parent.appendChild(row); return inp;
+}
+function buildSource() {
+  document.querySelectorAll('#srcbtns button').forEach(b => b.classList.toggle('on', b.dataset.src === S.src));
+  for (const k of ['preset', 'synth', 'live', 'replay']) $('src-' + k).hidden = S.src !== k;
+  $('src-preset').innerHTML = '';
+  for (const p of INFO.presets) {
+    const b = document.createElement('button'); b.textContent = p; b.classList.toggle('on', p === S.preset);
+    b.onclick = () => { S.preset = p; save(); buildSource(); sendSource(); };
+    $('src-preset').appendChild(b);
+  }
+  const sp = $('src-synth'); sp.innerHTML = '';
+  S.synth ||= { curl: {}, spread: {}, thumb_lift: 20, thumb_curl: 10, thumb_swing: 0 };
+  const upd = () => { save(); sendSource(); };
+  for (const f of FINGERS.slice(1)) slider(sp, f + ' 굽힘°', 0, 90, 1, S.synth.curl[f] || 0, v => { S.synth.curl[f] = v; upd(); });
+  for (const f of FINGERS.slice(1)) slider(sp, f + ' 벌림°', -20, 20, 1, S.synth.spread[f] || 0, v => { S.synth.spread[f] = v; upd(); });
+  slider(sp, '엄지 들기°', -10, 80, 1, S.synth.thumb_lift, v => { S.synth.thumb_lift = v; upd(); });
+  slider(sp, '엄지 굽힘°', 0, 60, 1, S.synth.thumb_curl, v => { S.synth.thumb_curl = v; upd(); });
+  slider(sp, '엄지 스윙°', -30, 60, 1, S.synth.thumb_swing, v => { S.synth.thumb_swing = v; upd(); });
+}
+function buildKnobs() {
+  S.knobs ||= JSON.parse(JSON.stringify(INFO.knobs));
+  const k = S.knobs, el = $('knobs'); el.innerHTML = '';
+  const upd = () => { save(); sendConfig(); };
+  slider(el, 'scale', 0.6, 1.6, 0.01, k.scale ?? 1, v => { k.scale = v; upd(); }, v => v.toFixed(2));
+  slider(el, 'project_dist mm', 5, 80, 1, (k.project_dist ?? 0.03) * 1e3, v => { k.project_dist = v / 1e3; upd(); });
+  slider(el, 'escape_dist mm', 10, 120, 1, (k.escape_dist ?? 0.05) * 1e3, v => { k.escape_dist = v / 1e3; upd(); });
+  k.filter ||= { min_cutoff: 1.0, beta: 0.05, d_cutoff: 1.0 };
+  slider(el, 'filter min_cutoff', 0.1, 5, 0.1, k.filter.min_cutoff, v => { k.filter.min_cutoff = v; upd(); }, v => v.toFixed(1));
+  slider(el, 'filter beta', 0, 1, 0.01, k.filter.beta, v => { k.filter.beta = v; upd(); }, v => v.toFixed(2));
+  const row = document.createElement('div'); row.className = 'row';
+  row.innerHTML = `<label>bone_scale</label><input type="checkbox" ${k.bone_scale !== false ? 'checked' : ''}><span class="muted">손가락별 뼈길이 정규화</span>`;
+  row.querySelector('input').onchange = e => { k.bone_scale = e.target.checked; upd(); };
+  el.appendChild(row);
+  const b = document.createElement('button'); b.textContent = '기본값으로';
+  b.onclick = () => { S.knobs = JSON.parse(JSON.stringify(INFO.knobs)); buildKnobs(); upd(); };
+  el.appendChild(b);
+}
+function buildLocks() {
+  const el = $('locks'); el.innerHTML = '';
+  const h = INFO.hands[S.hand];
+  const det = document.createElement('details');
+  det.open = Object.keys(S.locks).length > 0;
+  det.innerHTML = `<summary>${Object.keys(S.locks).length}개 고정 — 펼치기</summary>`;
+  for (const d of h.dofs) {
+    const row = document.createElement('div'); row.className = 'row';
+    const on = d.joint in S.locks, deg = x => (x * 180 / Math.PI);
+    const v0 = on ? S.locks[d.joint] : Math.min(Math.max(0, d.lo), d.hi);
+    row.innerHTML = `<input type="checkbox" ${on ? 'checked' : ''}><label title="${d.joint}">${d.wire}</label>
+      <input type="range" min="${deg(d.lo)}" max="${deg(d.hi)}" step="1" value="${deg(v0)}" ${on ? '' : 'disabled'}><span class="v">${deg(v0).toFixed(0)}</span>`;
+    const [cb, rg] = row.querySelectorAll('input'), out = row.querySelector('.v');
+    cb.onchange = () => { if (cb.checked) S.locks[d.joint] = +rg.value * Math.PI / 180; else delete S.locks[d.joint];
+                          rg.disabled = !cb.checked; save(); sendConfig(); det.querySelector('summary').textContent = `${Object.keys(S.locks).length}개 고정`; };
+    rg.oninput = () => { out.textContent = (+rg.value).toFixed(0); if (cb.checked) { S.locks[d.joint] = +rg.value * Math.PI / 180; save(); sendConfig(); } };
+    det.appendChild(row);
+  }
+  el.appendChild(det);
+}
+function buildDisplay() {
+  const el = $('disp'); el.innerHTML = '';
+  const names = { skeleton: '사람 손', targets: '목표점', tips: '로봇 손끝', errlines: '오차선', pairs: '투영 접촉', axes: 'base 축' };
+  for (const [k, n] of Object.entries(names)) {
+    const b = document.createElement('button'); b.textContent = n; b.classList.toggle('on', !!S.show[k]);
+    b.onclick = () => { S.show[k] = !S.show[k]; save(); buildDisplay(); if (last) drawOverlay(last); };
+    el.appendChild(b);
+  }
+}
+async function refreshRecordings() {
+  const r = await (await fetch('/api/hands')).json();
+  $('recsel').innerHTML = r.recordings.map(n => `<option>${n}</option>`).join('') || '<option value="">(녹화 없음)</option>';
+}
+
+async function init() {
+  INFO = await (await fetch('/api/hands')).json();
+  if (!INFO.hands[S.hand]) S.hand = 'dg5f';
+  $('hand').innerHTML = Object.entries(INFO.hands).map(([k, h]) => `<option value="${k}">${h.label}</option>`).join('');
+  $('hand').value = S.hand;
+  $('hand').onchange = () => { S.hand = $('hand').value; S.locks = {}; save(); buildLocks(); sendConfig(); loadRobot(); };
+  $('reset').onclick = () => send({ type: 'reset' });
+  document.querySelectorAll('#srcbtns button').forEach(b => b.onclick = () => { S.src = b.dataset.src; save(); buildSource(); sendSource(); });
+  document.querySelectorAll('[data-cam]').forEach(b => b.onclick = () => setCam(b.dataset.cam));
+  $('recbtn').onclick = () => {
+    const on = !$('recbtn').classList.contains('rec');
+    $('recbtn').classList.toggle('rec', on); $('recbtn').textContent = on ? '■ 정지·저장' : '● 녹화';
+    send({ type: 'record', on });
+  };
+  $('recsel').onchange = sendSource;
+  $('recrefresh').onclick = refreshRecordings;
+  $('opacity').value = S.opacity; $('opacityv').textContent = S.opacity;
+  $('opacity').oninput = () => { S.opacity = +$('opacity').value; $('opacityv').textContent = S.opacity; save();
+    robot?.traverse(o => { if (o.isMesh) o.material.opacity = S.opacity; }); };
+  $('recsel').innerHTML = INFO.recordings.map(n => `<option>${n}</option>`).join('') || '<option value="">(녹화 없음)</option>';
+  buildSource(); buildKnobs(); buildLocks(); buildDisplay();
+  loadRobot();
+  connect();
+}
+init().catch(e => showErr('초기화 실패: ' + e));
+</script>
+</body>
+</html>

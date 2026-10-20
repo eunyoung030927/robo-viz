@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+retarget_viewer/recordings/
+_ref/
+.git-credentials
+*.token
+.env
