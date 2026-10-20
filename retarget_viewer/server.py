@@ -26,6 +26,7 @@ from aiohttp import WSMsgType, web
 import hands
 import synth
 from tesollo_map import TesolloMap
+from real_hand import RealHand
 
 HERE = pathlib.Path(__file__).resolve().parent
 STATIC = HERE / "static"
@@ -109,9 +110,13 @@ def _cert_host(cert: pathlib.Path):
 
 
 # ------------------------------------------------------------------ 세션(브라우저 1개)
+REAL = RealHand()                 # 실물 DG-5F 읽기 전용 미러 (프로세스 공용, 참조 카운트)
+
+
 class Session:
     def __init__(self, live: Live):
         self.live = live
+        self._real_on = False
         self.hand = "dg5f"
         self.knobs: dict = {}
         self.locks: dict = {}
@@ -163,10 +168,38 @@ class Session:
             return kps[int(np.searchsorted(t, el, side="right")) - 1]
         return None
 
+    def set_real(self, on: bool):
+        if on and not self._real_on:
+            REAL.acquire()
+        elif not on and self._real_on:
+            REAL.release()
+        self._real_on = on
+
+    def real_frame(self, out: dict) -> dict:
+        """실물 관절각(와이어°)을 **변환 없이** URDF 관절에 그대로 — 와이어°=URDF° 가정 검증."""
+        from robosynapse.common.grippers.tesollo_dg5f import protocol as P
+        out["real"] = REAL.snapshot()
+        deg = REAL.deg
+        if deg is None:
+            out["nokp"] = True
+            return out
+        urdf = {j: info for j, info in hands.urdf_joints(hands.HANDS["dg5f"]["urdf"]).items()}
+        rows = []
+        for name, j, mlo, mhi in P.DOF_SPECS:
+            v = deg[name]
+            lo, hi = np.degrees(urdf[j]["lower"]), np.degrees(urdf[j]["upper"])
+            rows.append({"dof": name, "joint": j, "deg": v, "urdf": [lo, hi], "manual": [mlo, mhi],
+                         "out_urdf": bool(v < lo - 2 or v > hi + 2),
+                         "out_manual": bool(v < mlo - 2 or v > mhi + 2)})
+        out.update({"q": {r["joint"]: float(np.radians(r["deg"])) for r in rows}, "real_rows": rows})
+        return out
+
     # --- one tick
     def frame(self) -> dict:
         out = {"type": "frame", "hand": self.hand, "err": self.err,
                "live": self.live.status(), "rec": None if self.rec is None else len(self.rec)}
+        if self.source.get("kind") == "real":
+            return self.real_frame(out)
         if self.rt is None:
             return out
         kp = self.keypoints()
@@ -240,6 +273,7 @@ class Session:
             self.rebuild()
         elif t == "source":
             self.source = {k: v for k, v in m.items() if k != "type"}
+            self.set_real(self.source["kind"] == "real")
             if self.source["kind"] == "live":
                 return {"type": "live", **self.live.start()}
             if self.source["kind"] == "replay":
@@ -334,6 +368,7 @@ def make_app(live: Live) -> web.Application:
                     await sock.send_str(json.dumps(reply))
         finally:
             task.cancel()
+            sess.set_real(False)          # 창을 닫으면 실물 연결도 놓는다
         return sock
 
     app.router.add_get("/", index)

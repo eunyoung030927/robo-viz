@@ -67,6 +67,7 @@
     <button data-src="synth">합성 슬라이더</button>
     <button data-src="live">Quest 실시간</button>
     <button data-src="replay">녹화 재생</button>
+    <button data-src="real">실물 손 (읽기만)</button>
   </div>
   <div id="src-preset" class="row"></div>
   <div id="src-synth"></div>
@@ -76,6 +77,12 @@
     <div class="row"><button id="recbtn">● 녹화</button><span id="recstat" class="muted"></span></div>
   </div>
   <div id="src-replay" class="row"><select id="recsel"></select><button id="recrefresh">새로고침</button></div>
+  <div id="src-real">
+    <div class="muted">실물 DG-5F 관절각을 <b>읽기만</b> 해서(손에 명령 0) 변환 없이 URDF 에 그대로 띄운다 — 와이어°=URDF° 확인용.
+      손을 webctl 이 잡고 있으면 webctl 값을 대신 읽는다(갱신 ~5초). 손가락을 손으로 움직여 화면과 같은 방향인지 볼 것.</div>
+    <div class="row"><span id="realstat" class="muted">-</span></div>
+    <table id="realtbl"></table>
+  </div>
 
   <h2>리타겟 노브 <span class="muted">(profile.teleop.dex.dexpilot)</span></h2>
   <div id="knobs"></div>
@@ -300,6 +307,10 @@ function sendSource() {
   else if (S.src === 'synth') send({ type: 'source', kind: 'synth', params: S.synth });
   else if (S.src === 'live') send({ type: 'source', kind: 'live' });
   else if (S.src === 'replay' && $('recsel').value) send({ type: 'source', kind: 'replay', file: $('recsel').value });
+  else if (S.src === 'real') {
+    if (S.hand !== 'dg5f') { S.hand = 'dg5f'; $('hand').value = 'dg5f'; save(); sendConfig(); loadRobot(); }
+    send({ type: 'source', kind: 'real' });
+  }
 }
 function showErr(e) { $('err').textContent = e || ''; }
 function onFrame(f) {
@@ -312,6 +323,7 @@ function onFrame(f) {
     if (L.err) showErr(L.err);
   }
   $('recstat').textContent = f.rec != null ? `녹화 중 ${f.rec} 프레임` : $('recstat').textContent;
+  if (f.real) { onReal(f); return; }
   if (!f.q) { $('hud').innerHTML = f.nokp ? '<b>손 프레임 없음</b> (추적 안 됨 / 대기)' : ''; return; }
   last = f;
   if (robot) {
@@ -333,6 +345,22 @@ function onFrame(f) {
     `<br><span class="sw" style="background:#8a93a0"></span>사람 손(손 프레임) <span class="sw" style="background:#ffae42"></span>목표(뼈길이 정규화) <span class="sw" style="background:#fff"></span>로봇 손끝 <span class="sw" style="background:#ffff66"></span>투영 접촉`;
 }
 
+function onReal(f) {
+  const R = f.real || {};
+  $('realstat').innerHTML = (R.via ? `<span style="color:var(--ok)">● ${R.via === 'modbus' ? '직접 Modbus 30Hz' : 'webctl 경유 (~5초 갱신)'}</span> · ${R.info}` : '<span style="color:var(--warn)">● 연결 대기</span>') +
+    (R.age_s != null ? ` · ${R.age_s}s 전` : '') + (R.err ? `<br><span class="err">${R.err}</span>` : '');
+  if (!f.q) { $('hud').innerHTML = '<b>실물 각도 대기 중…</b>'; return; }
+  if (robot) for (const [j, v] of Object.entries(f.q)) { const J = robot.joints[j]; if (J) { J.ignoreLimits = true; J.setJointValue(v); } }
+  if (ghost) ghost.visible = false;
+  if (overlay) overlay.children.slice().forEach(o => overlay.remove(o));
+  const bad = f.real_rows.filter(r => r.out_urdf).length, badm = f.real_rows.filter(r => r.out_manual).length;
+  $('hud').innerHTML = `<b>실물 미러</b> (와이어° → URDF° 변환 없음) · URDF 범위 밖 <b style="color:${bad ? 'var(--warn)' : 'var(--ok)'}">${bad}</b>개 · 매뉴얼 범위 밖 <b>${badm}</b>개`;
+  $('realtbl').innerHTML = '<tr><th>DOF</th><th>실물°</th><th>URDF 범위</th><th>매뉴얼 범위</th></tr>' + f.real_rows.map(r =>
+    `<tr><td title="${r.joint}">${r.dof}</td><td>${r.deg.toFixed(1)}</td>
+     <td style="color:${r.out_urdf ? 'var(--warn)' : 'inherit'}">${r.urdf[0].toFixed(0)}..${r.urdf[1].toFixed(0)}</td>
+     <td style="color:${r.out_manual ? 'var(--warn)' : 'inherit'}">${r.manual[0].toFixed(0)}..${r.manual[1].toFixed(0)}</td></tr>`).join('');
+}
+
 // ------------------------------------------------------------------ UI
 function slider(parent, label, min, max, step, val, on, fmt = v => v) {
   const row = document.createElement('div'); row.className = 'row';
@@ -343,7 +371,7 @@ function slider(parent, label, min, max, step, val, on, fmt = v => v) {
 }
 function buildSource() {
   document.querySelectorAll('#srcbtns button').forEach(b => b.classList.toggle('on', b.dataset.src === S.src));
-  for (const k of ['preset', 'synth', 'live', 'replay']) $('src-' + k).hidden = S.src !== k;
+  for (const k of ['preset', 'synth', 'live', 'replay', 'real']) $('src-' + k).hidden = S.src !== k;
   $('src-preset').innerHTML = '';
   for (const p of INFO.presets) {
     const b = document.createElement('button'); b.textContent = p; b.classList.toggle('on', p === S.preset);
