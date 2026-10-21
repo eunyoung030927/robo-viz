@@ -19,6 +19,7 @@ bash run.sh
 | 합성 슬라이더 | 손가락별 굽힘·벌림, 엄지 들기·굽힘·스윙 |
 | Quest 실시간 | robo-synapse `WebXRHandSource` 를 **8013** 에 따로 띄운다(webctl 8012 와 무관). 패널에 뜬 `https://ro1-…ts.net:8013/?k=…` 를 헤드셋에서 열고 Pass-through. 오른손만 사용. 토큰은 `~/.config/robo-viz/xr_token` 에 고정(재시작해도 주소 같음 — 헤드셋 북마크) |
 | 녹화 재생 | Quest 입력 중 `● 녹화` → `recordings/YYMMDD_HHMMSS.npz` (t, kp[N,25,3]) 를 반복 재생 |
+| Manus 장갑 | Manus Metagloves 를 ro1 에 꽂힌 동글로 직접 읽음(Manus SDK Integrated, 읽기만 — `manus_source.py`, SDK 경로 `MANUS_SDK_PY` 기본 `~/workspace/manus_sdk/Python`). raw skeleton 25 노드 = WebXR 25관절 순서 그대로 → DexPilot, ergonomics → Tesollo 공식 매핑에 그대로. 왼손 장갑이면 손바닥 평면 반사로 오른손 로봇에. 다른 Manus 프로그램은 꺼 둘 것(동글 점유). ⚠ 장갑 캘리브레이션 전에는 MCP 가 −40° 근처(손 편 상태)로 나와 손끝 오차가 큼 |
 | 실물 손 (읽기만) | 실물 DG-5F 관절각을 Modbus FC04 로 읽기만 해서 URDF 에 그대로(손에 명령 0). webctl 이 손을 잡고 있으면 webctl `/status` 경유(~5 s). 범위 측정(최소/최대 → `recordings/dg5f_ranges_*.json`) |
 
 ## 화면

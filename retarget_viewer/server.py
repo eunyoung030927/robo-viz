@@ -27,6 +27,7 @@ import hands
 import synth
 from tesollo_map import TesolloMap
 from real_hand import RealHand
+from manus_source import MANUS
 
 HERE = pathlib.Path(__file__).resolve().parent
 STATIC = HERE / "static"
@@ -117,6 +118,9 @@ class Session:
     def __init__(self, live: Live):
         self.live = live
         self._real_on = False
+        self._manus_on = False
+        self._manus_ergo = None                # 최근 Manus ergonomics (Tesollo 이름)
+        self.control_hand = "right"            # 사람 손(왼손 장갑이면 left — DexPilot 이 반사)
         self.hand = "dg5f"
         self.knobs: dict = {}
         self.locks: dict = {}
@@ -132,7 +136,7 @@ class Session:
 
     def rebuild(self):
         try:
-            self.rt = hands.build(self.hand, self.knobs, self.locks)
+            self.rt = hands.build(self.hand, self.knobs, self.locks, control_hand=self.control_hand)
             self.tm = None
             if self.hand == "dg5f":
                 lim = {j: (min(a, b), max(a, b)) for _d, j, a, b in hands.dof_space(self.hand)[1]}
@@ -162,11 +166,27 @@ class Session:
             if kp is not None and self.rec is not None:
                 self.rec.append((time.monotonic(), kp.copy()))
             return kp
+        if s["kind"] == "manus":
+            r = MANUS.latest()
+            if r is None:
+                return None
+            kp, self._manus_ergo, side, _gid = r
+            if side and side != self.control_hand:   # 왼손 장갑 → 오른손 로봇: 손바닥 평면 반사
+                self.control_hand = side
+                self.rebuild()
+            return kp
         if s["kind"] == "replay" and self.replay is not None:
             t, kps, t0 = self.replay
             el = (time.monotonic() - t0) % max(t[-1], 1e-3)
             return kps[int(np.searchsorted(t, el, side="right")) - 1]
         return None
+
+    def set_manus(self, on: bool):
+        if on and not self._manus_on:
+            MANUS.acquire()
+        elif not on and self._manus_on:
+            MANUS.release()
+        self._manus_on = on
 
     def set_real(self, on: bool):
         if on and not self._real_on:
@@ -202,6 +222,8 @@ class Session:
                "live": self.live.status(), "rec": None if self.rec is None else len(self.rec)}
         if self.source.get("kind") == "real":
             return self.real_frame(out)
+        if self.source.get("kind") == "manus":
+            out["manus"] = {**MANUS.status(), "control_hand": self.control_hand}
         if self.rt is None:
             return out
         kp = self.keypoints()
@@ -211,7 +233,7 @@ class Session:
         rt = self.rt
         names = [j for _, j, *_ in rt._map]
         t0 = time.perf_counter()
-        filtered = self.source["kind"] in ("live", "replay")
+        filtered = self.source["kind"] in ("live", "replay", "manus")
         q_dp = rt._step(kp, filtered=filtered)       # 항상 돈다(warm start·투영 상태 유지)
         ms = (time.perf_counter() - t0) * 1e3
         if q_dp is None:
@@ -219,7 +241,8 @@ class Session:
             return out
         q_t = None
         if self.tm is not None:
-            d = self.tm(kp, filtered=filtered)
+            use_ergo = self.source["kind"] == "manus" and self._manus_ergo is not None
+            d = self.tm(kp, filtered=filtered, ergo=self._manus_ergo if use_ergo else None)
             if d is not None and self.knobs.get("tesollo_thumb_dp", True):
                 # 엄지는 DexPilot 해를 쓴다: 각도 대응만으로는 대립(손바닥 가로지르기)이 안 나온다
                 # (Quest 에서 대립 중 손바닥 평면 안 벌림각이 0 근처로 무너져 thumb1 이 작아짐)
@@ -276,6 +299,10 @@ class Session:
         elif t == "source":
             self.source = {k: v for k, v in m.items() if k != "type"}
             self.set_real(self.source["kind"] == "real")
+            self.set_manus(self.source["kind"] == "manus")
+            if self.source["kind"] != "manus" and self.control_hand != "right":
+                self.control_hand = "right"
+                self.rebuild()
             if self.source["kind"] == "live":
                 return {"type": "live", **self.live.start()}
             if self.source["kind"] == "replay":
@@ -387,6 +414,7 @@ def make_app(live: Live) -> web.Application:
         finally:
             task.cancel()
             sess.set_real(False)          # 창을 닫으면 실물 연결도 놓는다
+            sess.set_manus(False)
         return sock
 
     app.router.add_get("/", index)

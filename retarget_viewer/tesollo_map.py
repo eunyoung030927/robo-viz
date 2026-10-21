@@ -130,7 +130,13 @@ class TesolloMap:
         if self._f is not None:
             self._f.reset()
 
-    def __call__(self, kp, filtered: bool = True):
+    def __call__(self, kp, filtered: bool = True, ergo: dict | None = None):
+        """`ergo` 를 주면(Manus 장갑 ergonomics, Tesollo 이름) 키포인트에서 재지 않고 그 값을
+        그대로 쓴다 — Tesollo 공식이 원래 받던 입력이라 근사가 없다."""
+        if ergo is not None:
+            self.ergo = {k: float(v) for k, v in ergo.items()}
+            q = tesollo_q(self.ergo, calib=self.calib)
+            return {j: float(np.clip(v, *self.limits[j])) for j, v in q.items()}
         kp = np.asarray(kp, float)
         if kp.shape != (25, 3) or not np.isfinite(kp[1:]).all():
             return None

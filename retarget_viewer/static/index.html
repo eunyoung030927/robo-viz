@@ -68,6 +68,7 @@
     <button data-src="live">Quest 실시간</button>
     <button data-src="replay">녹화 재생</button>
     <button data-src="real">실물 손 (읽기만)</button>
+    <button data-src="manus">Manus 장갑</button>
   </div>
   <div id="src-preset" class="row"></div>
   <div id="src-synth"></div>
@@ -77,6 +78,12 @@
     <div class="row"><button id="recbtn">● 녹화</button><span id="recstat" class="muted"></span></div>
   </div>
   <div id="src-replay" class="row"><select id="recsel"></select><button id="recrefresh">새로고침</button></div>
+  <div id="src-manus">
+    <div class="muted">Manus Metagloves 를 이 서버(ro1)에 꽂힌 동글로 직접 읽는다(SDK Integrated, 읽기만).
+      다른 Manus 프로그램(예제·대시보드)은 꺼 둘 것. 왼손 장갑이면 손바닥 평면 반사로 오른손 로봇에 매핑.
+      Tesollo 공식 매핑은 장갑의 관절각(ergonomics)을 그대로 쓴다.</div>
+    <div class="row"><span id="manusstat" class="muted">-</span></div>
+  </div>
   <div id="src-real">
     <div class="muted">실물 DG-5F 관절각을 <b>읽기만</b> 해서(손에 명령 0) 변환 없이 URDF 에 그대로 띄운다 — 와이어°=URDF° 확인용.
       손을 webctl 이 잡고 있으면 webctl 값을 대신 읽는다(갱신 ~5초). 손가락을 손으로 움직여 화면과 같은 방향인지 볼 것.</div>
@@ -310,6 +317,7 @@ function sendSource() {
   else if (S.src === 'synth') send({ type: 'source', kind: 'synth', params: S.synth });
   else if (S.src === 'live') send({ type: 'source', kind: 'live' });
   else if (S.src === 'replay' && $('recsel').value) send({ type: 'source', kind: 'replay', file: $('recsel').value });
+  else if (S.src === 'manus') send({ type: 'source', kind: 'manus' });
   else if (S.src === 'real') {
     if (S.hand !== 'dg5f') { S.hand = 'dg5f'; $('hand').value = 'dg5f'; save(); sendConfig(); loadRobot(); }
     send({ type: 'source', kind: 'real' });
@@ -327,6 +335,13 @@ function onFrame(f) {
   }
   $('recstat').textContent = f.rec != null ? `녹화 중 ${f.rec} 프레임` : $('recstat').textContent;
   if (f.real) { onReal(f); return; }
+  if (f.manus) {
+    const M = f.manus, g = (M.gloves || [])[0];
+    $('manusstat').innerHTML = M.err ? `<span class="err">${M.err}</span>` :
+      !M.connected ? '<span style="color:var(--warn)">● SDK 시작 중…</span>' :
+      g ? `<span style="color:var(--ok)">● 장갑 ${g.id} (${g.side === 'left' ? '왼손' : '오른손'})</span> · ${g.n} 프레임 · ${g.age_s}s 전 · 로봇 매핑: ${M.control_hand === 'left' ? '왼손→오른손 반사' : '그대로'}` :
+      '<span style="color:var(--warn)">● 동글 연결됨 — 장갑 전원을 켜세요</span>';
+  }
   if (!f.q) { $('hud').innerHTML = f.nokp ? '<b>손 프레임 없음</b> (추적 안 됨 / 대기)' : ''; return; }
   last = f;
   if (robot) {
@@ -338,7 +353,7 @@ function onFrame(f) {
   }
   drawOverlay(f);
   renderTables(f);
-  if (f.ergo) $('thumbmeas').textContent = `엄지 측정: 평면 안 벌림 ${f.ergo.ThumbInPlane}° · 손바닥 쪽 들림 ${f.ergo.ThumbElevation}° (손 편 상태에서 thumb2≈0 이 되게 '대립 중립'을 들림각 근처로)`;
+  if (f.ergo && f.ergo.ThumbInPlane !== undefined) $('thumbmeas').textContent = `엄지 측정: 평면 안 벌림 ${f.ergo.ThumbInPlane}° · 손바닥 쪽 들림 ${f.ergo.ThumbElevation}° (손 편 상태에서 thumb2≈0 이 되게 '대립 중립'을 들림각 근처로)`;
   const proj = f.pairs.filter(p => p.proj).map(p => `${p.a}–${p.b}`).join(', ') || '-';
   const BE = { dexpilot: 'DexPilot(+λ)', tesollo: 'Tesollo 공식 매핑' };
   $('hud').innerHTML = `<b>${INFO.hands[S.hand].label}</b> · 메인 <b>${BE[f.backend] || '-'}</b>` +
@@ -376,7 +391,7 @@ function slider(parent, label, min, max, step, val, on, fmt = v => v) {
 }
 function buildSource() {
   document.querySelectorAll('#srcbtns button').forEach(b => b.classList.toggle('on', b.dataset.src === S.src));
-  for (const k of ['preset', 'synth', 'live', 'replay', 'real']) $('src-' + k).hidden = S.src !== k;
+  for (const k of ['preset', 'synth', 'live', 'replay', 'real', 'manus']) $('src-' + k).hidden = S.src !== k;
   $('src-preset').innerHTML = '';
   for (const p of INFO.presets) {
     const b = document.createElement('button'); b.textContent = p; b.classList.toggle('on', p === S.preset);
