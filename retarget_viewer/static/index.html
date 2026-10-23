@@ -339,7 +339,7 @@ function onFrame(f) {
     const M = f.manus, g = (M.gloves || [])[0];
     $('manusstat').innerHTML = M.err ? `<span class="err">${M.err}</span>` :
       !M.connected ? '<span style="color:var(--warn)">● SDK 시작 중…</span>' :
-      g ? `<span style="color:var(--ok)">● 장갑 ${g.id} (${g.side === 'left' ? '왼손' : '오른손'})</span> · ${g.n} 프레임 · ${g.age_s}s 전 · 로봇 매핑: ${M.control_hand === 'left' ? '왼손→오른손 반사' : '그대로'}` :
+      g ? `<span style="color:var(--ok)">● 장갑 ${g.id} (${g.side === 'left' ? '왼손' : '오른손'})</span> · ${M.via === 'bridge' ? '브리지 경유' : 'SDK 직접'} · ${g.n} 프레임 · 로봇 매핑: ${M.control_hand === 'left' ? '왼손→오른손 반사' : '그대로'}` :
       '<span style="color:var(--warn)">● 동글 연결됨 — 장갑 전원을 켜세요</span>';
   }
   if (!f.q) { $('hud').innerHTML = f.nokp ? '<b>손 프레임 없음</b> (추적 안 됨 / 대기)' : ''; return; }
