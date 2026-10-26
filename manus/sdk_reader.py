@@ -24,7 +24,19 @@ import time
 
 import numpy as np
 
-SDK_PY = os.path.expanduser(os.environ.get("MANUS_SDK_PY", "~/workspace/manus_sdk/Python"))
+def _find_sdk() -> str:
+    """Manus SDK Python 폴더: MANUS_SDK_PY → 흔한 위치(컨테이너 /workspace/manus_sdk, 호스트 ~/manus_sdk 등) 순."""
+    env = os.environ.get("MANUS_SDK_PY")
+    if env:
+        return os.path.expanduser(env)
+    for c in ("/workspace/manus_sdk/Python", "~/manus_sdk/Python", "~/workspace/manus_sdk/Python"):
+        c = os.path.expanduser(c)
+        if os.path.isdir(os.path.join(c, "manus_sdk")):
+            return c
+    return os.path.expanduser("~/workspace/manus_sdk/Python")
+
+
+SDK_PY = _find_sdk()
 
 # WebXR 인덱스: (chain, joint) → index
 _CHAINS = {"FingerThumb": 1, "FingerIndex": 5, "FingerMiddle": 10, "FingerRing": 15, "FingerPinky": 20}

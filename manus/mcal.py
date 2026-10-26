@@ -9,6 +9,8 @@
     python mcal.py load --side right --file /path/x.mcal  # 임의 경로의 파일 적용
 
 저장 폴더: `MANUS_MCAL_DIR`, 없으면 `~/.config/Manus/mcal` (bs1 컨테이너에선 /workspace/manus_config/mcal).
+SDK 위치는 자동으로 찾는다(MANUS_SDK_PY → /workspace/manus_sdk/Python → ~/manus_sdk/Python …).
+bs1 컨테이너: `source /workspace/dexverse_env.sh` (cffi 있는 환경) 후 `python /workspace/robo-viz/manus/mcal.py …`
 save/load 는 동글을 직접 잡는다 → 브리지·텔레옵·sdk_client 등 다른 Manus 프로그램을 끄고 실행할 것.
 load 로 적용한 값은 SDK 설정 파일(장갑별)에도 저장돼, 이후엔 그 장갑에 자동으로 쓰인다.
 """
