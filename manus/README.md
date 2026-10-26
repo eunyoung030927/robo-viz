@@ -57,4 +57,9 @@ r = manus.latest(prefer="right")     # (kp (25,3), ergo, side, glove id) | None
 - `client.py` — 수신기 (numpy 만)
 - `source.py` — `open_manus()`: 위 둘 중 하나를 골라 같은 `latest()` 로 돌려준다
 - `check.py` — 장갑 연결 확인(~12초)
-- `mcal.py` — 캘리브레이션(.mcal) 이름 붙여 저장·불러오기·목록 (`python mcal.py list|save|load --side right --name <이름>`)
+- `mcal.py` — 캘리브레이션 이름 붙여 저장·적용·디폴트 (자세한 건 파일 맨 위 설명)
+  - `snapshot --name X` / `apply [--name X]`: SDK 설정 파일의 장갑별 프로필 ↔ `X.profile.json` (장갑 꺼져도 됨)
+  - `save` / `load --side right [--name X]`: 장갑 ↔ `X_right.mcal` (Windows .mcal 과 같은 형식, 장갑 켜져야 함)
+  - `default --name X`: apply/load 에서 이름 생략 시 쓸 것. `list`: 저장된 것 + 디폴트
+  - 적용한 캘리브레이션은 SDK 설정 파일(`~/.config/Manus/Core 3/…Calibrations.json`)에 장갑 ID별로 남아
+    다른 걸 적용하거나 새로 캘리브레이션할 때까지 계속 쓰인다.
