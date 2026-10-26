@@ -42,7 +42,19 @@ r = mc.latest(prefer="right")   # (kp (25,3) m, ergo {이름: °} | None, side, 
   `ThumbDIPStretch`=IPStretch, `<Finger>Spread/MCPStretch/PIPStretch/DIPStretch`).
 - ⚠ 장갑 캘리브레이션 전엔 손을 펴도 MCPStretch 가 −40° 근처 — `sdk_client.py` → `C` 로 먼저 캘리브레이션.
 
+## 텔레옵 코드에서 (권장 진입점)
+```python
+import sys; sys.path.insert(0, "/workspace/manus")
+from source import open_manus
+manus = open_manus()                 # 기본: SDK 직접 / MANUS_BRIDGE_HOST 있으면 브리지 수신
+r = manus.latest(prefer="right")     # (kp (25,3), ergo, side, glove id) | None
+```
+동글 위치가 바뀌어도(이 PC ↔ 다른 PC 의 브리지) 코드는 그대로, 환경변수만 바꾼다.
+
 ## 파일
 - `sdk_reader.py` — Manus SDK Integrated 읽기(읽기 전용; 진동·페어링·캘리브레이션 안 함)
 - `bridge.py` — SDK → TCP 송출 (`--fake` 지원)
 - `client.py` — 수신기 (numpy 만)
+- `source.py` — `open_manus()`: 위 둘 중 하나를 골라 같은 `latest()` 로 돌려준다
+- `check.py` — 장갑 연결 확인(~12초)
+- `mcal.py` — 캘리브레이션(.mcal) 이름 붙여 저장·불러오기·목록 (`python mcal.py list|save|load --side right --name <이름>`)
