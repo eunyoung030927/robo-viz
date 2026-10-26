@@ -18,13 +18,21 @@ Manus 프로그램(브리지·텔레옵·sdk_client)이 시작할 때 여기서 
   python mcal.py default --name hscho                   # 디폴트 지정 (인자 없으면 현재 디폴트 출력)
 
 저장 폴더: `MANUS_MCAL_DIR`, 없으면 `~/.config/Manus/mcal` (bs1 컨테이너에선 /workspace/manus_config/mcal).
-bs1 컨테이너: `source /workspace/dexverse_env.sh` (cffi 있는 환경) 후 `python /workspace/robo-viz/manus/mcal.py …`
+SDK 위치: `MANUS_SDK_PY`, 없으면 /workspace/manus_sdk/Python → ~/manus_sdk/Python → ~/workspace/manus_sdk/Python.
+컨테이너: `source /workspace/dexverse_env.sh` (cffi 있는 환경) 후
+`python /workspace/DexVerse/vr_teleop/vr_teleop/devices/manus/mcal.py …` — 이 파일 하나로 동작한다(다른 모듈 불필요).
 apply/save/load 는 동글을 쓰는 다른 Manus 프로그램(브리지 등)이 꺼져 있어야 한다 — apply 는 직접 확인하고 거부한다.
+
+ro1: 서버 전역 명령 `mcal …` (= ~/.local/bin/mcal → conda manus 의 python 으로 이 파일 실행). 프로필은 ro1 로컬
+`~/.config/Manus/mcal` — robo-synapse·robo-viz·bridge 등 ro1 의 모든 Manus 프로그램이 같은 캘리브레이션을 쓴다
+(SDK 가 시작할 때 ~/.config/Manus 설정 파일에서 장갑 ID 로 읽으므로 레포와 무관).
+출처: DexVerse fork `dev` vr_teleop/vr_teleop/devices/manus/mcal.py (4318602, bs1 6661ac9) 그대로 — 고치면 양쪽 맞출 것.
 """
 
 from __future__ import annotations
 
 import argparse
+import atexit
 import datetime as dt
 import glob
 import json
@@ -33,7 +41,6 @@ import shutil
 import sys
 import time
 
-HERE = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_DIR = os.environ.get("MANUS_MCAL_DIR") or os.path.expanduser("~/.config/Manus/mcal")
 CONFIG_DIR = os.environ.get("MANUS_CONFIG_DIR") or os.path.expanduser("~/.config/Manus")
 MANUS_VID = "3325"
@@ -212,22 +219,54 @@ def cmd_default(args):
     print(f"[mcal] 디폴트 = {args.name}  (apply / load 에서 --name 생략 시 사용)")
 
 
+def _sdk_path() -> str:
+    env = os.environ.get("MANUS_SDK_PY")
+    if env:
+        return os.path.expanduser(env)
+    for c in ("/workspace/manus_sdk/Python", "~/manus_sdk/Python", "~/workspace/manus_sdk/Python"):
+        c = os.path.expanduser(c)
+        if os.path.isdir(os.path.join(c, "manus_sdk")):
+            return c
+    sys.exit("[mcal] Manus SDK Python 폴더를 못 찾음 — MANUS_SDK_PY 로 지정")
+
+
 def _open_glove(side: str, timeout: float):
-    """SDK(Integrated) 시작 → `side` 장갑이 데이터를 보낼 때까지 기다려 (lib, ffi, glove_id)."""
-    sys.path.insert(0, HERE)
-    from sdk_reader import MANUS
-    MANUS.acquire()
-    t0 = time.time()
+    """SDK(Integrated) 시작 → `side` 장갑이 데이터를 보낼 때까지 기다려 (lib, ffi, glove_id).
+    프로세스가 끝날 때 SDK 를 내린다(이때 SDK 가 설정 파일을 다시 쓴다)."""
+    sys.path.insert(0, _sdk_path())
+    try:
+        from manus_sdk import ManusSDK, ffi, lib
+        from manus_sdk.generated._enums import AxisPolarity, AxisView, SDKReturnCode, Side
+    except ImportError as e:
+        sys.exit(f"[mcal] Manus SDK import 실패: {e} — cffi 있는 환경인가? (source /workspace/dexverse_env.sh)")
+    ok = SDKReturnCode.Success
+    sdk = ManusSDK()
+    live = set()                                     # 데이터를 보내고 있는 장갑 ID
+    sdk.register_ergonomics_callback(
+        lambda s: live.update(s.data[i].id for i in range(s.dataCount) if not s.data[i].isUserID))
+    r = lib.CoreSdk_InitializeIntegrated()
+    if r != ok:
+        sys.exit(f"[mcal] SDK 초기화 실패: {SDKReturnCode(r).name} — 다른 Manus 프로그램(브리지 등)이 켜져 있나?")
+    atexit.register(lambda: lib.CoreSdk_ShutDown())
+    cs = ffi.new("CoordinateSystemVUH*")             # 연결 전에 좌표계를 정해야 데이터가 온다
+    cs.view, cs.up, cs.handedness, cs.unitScale = AxisView.XFromViewer, AxisPolarity.PositiveZ, Side.Right, 1.0
+    lib.CoreSdk_InitializeCoordinateSystemWithVUH(cs[0], True)
+    t0, connected = time.time(), False
     while time.time() - t0 < timeout:
-        if MANUS.err and "초기화 실패" in MANUS.err:
-            sys.exit(f"[mcal] {MANUS.err}")
-        with MANUS._lock:
-            ids = [gid for gid, g in MANUS.gloves.items() if g.get("side") == side and g.get("kp") is not None]
-        if ids:
-            return MANUS._lib, MANUS._ffi, ids[0]
+        if not connected and lib.CoreSdk_LookForHosts(1, False) == ok:
+            cnt = ffi.new("uint32_t*")
+            lib.CoreSdk_GetNumberOfAvailableHostsFound(cnt)
+            if cnt[0]:
+                hosts = ffi.new("ManusHost[]", cnt[0])
+                lib.CoreSdk_GetAvailableHostsFound(hosts, cnt[0])
+                connected = lib.CoreSdk_ConnectToHost(hosts[0]) == ok
+        for gid in list(live):
+            g = ffi.new("GloveLandscapeData*")
+            if lib.CoreSdk_GetDataForGlove_UsingGloveId(gid, g) == ok and Side(g.side).name.lower() == side:
+                return lib, ffi, gid
         time.sleep(0.2)
     sys.exit(f"[mcal] {side} 장갑이 {timeout:.0f}초 안에 안 보임 — 장갑 전원, 다른 Manus 프로그램(브리지 등) 종료 확인 "
-             f"(SDK 상태: {MANUS.status()})")
+             f"(동글 연결 {'됨' if connected else '안 됨'}, 데이터 오는 장갑 {[f'{g:#x}' for g in live]})")
 
 
 def cmd_save(args):
