@@ -74,7 +74,9 @@ class PriorDexPilot(DexPilotRetarget):
         # `_step` 이 solve 직전에 (필터를 거친) 키포인트로 부르는 자리 — θ 도 같은 프레임에서 잰다
         if self.angle_prior > 0 and self._angle_fn is not None:
             try:
-                th = self._angle_fn(kp)
+                # 왼손은 거울상으로 바꿔 잰다 — 굽힘은 그대로, 벌림 부호가 오른손 규약이 된다
+                th = self._angle_fn(kp if self.hand == "right"
+                                    else np.asarray(kp, float) * np.array([-1.0, 1.0, 1.0]))
                 idx = np.array([i for i, n in enumerate(self._names) if n in th], int)
                 self._theta = (idx, np.array([th[self._names[i]] for i in idx]))
             except Exception:

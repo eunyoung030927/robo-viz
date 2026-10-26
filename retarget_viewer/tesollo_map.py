@@ -116,11 +116,12 @@ class TesolloMap:
     """키포인트 → (ergo, {joint: rad}) . One-Euro 필터는 DexPilot 과 같은 노브를 쓴다."""
 
     def __init__(self, limits_rad: dict, *, calib: bool = True, filter=None, clock=None,
-                 thumb_in_off: float = 0.0, thumb_elev0: float = 15.0):
+                 thumb_in_off: float = 0.0, thumb_elev0: float = 15.0, side: str = "right"):
         from robosynapse.common.teleop.dexpilot_retarget import OneEuro
         import time
         self.limits = limits_rad
         self.calib = bool(calib)
+        self.side = side               # 왼손 키포인트는 거울로 오른손 기하로 바꿔 잰다(화면은 거울 로봇)
         self.thumb_in_off, self.thumb_elev0 = float(thumb_in_off), float(thumb_elev0)
         self._f = OneEuro(**{k: float(v) for k, v in filter.items()}) if filter else None
         self._clock = clock or time.monotonic
@@ -142,6 +143,8 @@ class TesolloMap:
             return None
         if filtered and self._f is not None:
             kp = self._f(kp, self._clock())
+        if self.side == "left":
+            kp = kp * np.array([-1.0, 1.0, 1.0])
         try:
             self.ergo = human_ergo(kp, thumb_in_off=self.thumb_in_off,
                                    thumb_elev0=self.thumb_elev0)

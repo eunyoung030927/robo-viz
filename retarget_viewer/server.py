@@ -5,7 +5,12 @@
   * live        — Quest WebXR. robo-synapse `WebXRHandSource` 를 **별도 포트(기본 8013)** 로
                   띄워 webctl(8012)과 부딪히지 않는다. 인증서는 robo-synapse 의 공용
                   config/teleop.local.{crt,key}, 토큰은 이 프로세스가 따로 만든다.
-  * replay      — live 를 녹화한 recordings/*.npz
+  * replay      — live 를 녹화한 recordings/*.npz (양손: kp_r/kp_l)
+  * manus       — Manus 장갑(manus_source.py)
+  * real        — 실물 DG-5F 읽기 전용 미러(real_hand.py)
+
+사람 손은 오른손·왼손·양손(`config.sides`). 손마다 Lane(DexPilot + Tesollo 매핑)을 따로 돌리고,
+왼손은 DexPilot 이 반사해 오른손 로봇 문제로 풀어 화면에서 거울로 뒤집어 그린다.
 
     python server.py [--port 8030] [--host 127.0.0.1] [--xr-port 8013]
 """
@@ -48,10 +53,9 @@ class Live:
 
     def start(self) -> dict:
         if self.src is None:
-            from robosynapse.common.teleop.webxr_source import WebXRHandSource
             cert, key = self.repo / "config/teleop.local.crt", self.repo / "config/teleop.local.key"
             have = cert.is_file() and key.is_file()
-            self.src = WebXRHandSource(port=self.port, cert=str(cert) if have else None,
+            self.src = _both_hands_source()(port=self.port, cert=str(cert) if have else None,
                                        key=str(key) if have else None,
                                        control_hand="right",
                                        public_host=_cert_host(cert) if have else None)
@@ -73,10 +77,38 @@ class Live:
                 "err": self.src.err or ""}
 
     def keypoints(self, side: str = "right"):
+        """그 손의 최신 25관절(0.5 s 넘게 안 오면 None — 추적 끊김)."""
         if self.src is None:
             return None
-        f = self.src.latest()
-        return None if f is None or f.keypoints is None else np.asarray(f.keypoints, float)
+        e = self.src.both.get(side)
+        if e is None or time.monotonic() - e[0] > STALE_S:
+            return None
+        return e[1]
+
+
+STALE_S = 0.5
+
+
+def _both_hands_source():
+    """robo-synapse `WebXRHandSource` + 양손 저장. 원본은 control_hand 한 손의 프레임만 남기고
+    다른 손은 클러치로만 쓰므로, 같은 페이로드에서 양손 25관절을 따로 보관한다(robo-synapse 무수정)."""
+    from robosynapse.common.teleop.vr_vuer import joint_matrices
+    from robosynapse.common.teleop.webxr_source import WebXRHandSource
+
+    class BothHands(WebXRHandSource):
+        def __init__(self, **kw):
+            super().__init__(**kw)
+            self.both = {}                     # side -> (monotonic t, kp (25,3))
+
+        def _on_hands(self, v):
+            super()._on_hands(v)
+            now = time.monotonic()
+            for side in ("right", "left"):
+                m = joint_matrices(v.get(side))
+                if m is not None:
+                    self.both[side] = (now, np.array(m[:, :3, 3], float))
+
+    return BothHands
 
 
 TOKEN_FILE = pathlib.Path.home() / ".config/robo-viz/xr_token"
@@ -114,72 +146,113 @@ def _cert_host(cert: pathlib.Path):
 REAL = RealHand()                 # 실물 DG-5F 읽기 전용 미러 (프로세스 공용, 참조 카운트)
 
 
+SIDES = {"right": ("right",), "left": ("left",), "both": ("right", "left")}
+
+
+def mirror_kp(kp):
+    """오른손 키포인트 ↔ 왼손 키포인트 (x 반전 = 거울상). 합성 손을 왼손으로 쓸 때."""
+    out = np.array(kp, float, copy=True)
+    out[:, 0] *= -1.0
+    return out
+
+
+class Lane:
+    """사람 손 하나 → 로봇 손 하나. 왼손은 DexPilot 이 손바닥 평면 반사로 오른손 로봇 문제로 풀고,
+    화면은 오른손 URDF 를 거울로 뒤집어 왼손으로 그린다(DG-5F LEFT = RIGHT 의 거울상)."""
+
+    def __init__(self, side: str):
+        self.side = side
+        self.rt = None
+        self.tm = None
+        self.ergo = None                       # 최근 Manus ergonomics (Tesollo 이름)
+
+    def reset(self):
+        if self.rt is not None:
+            self.rt.reset()
+        if self.tm is not None:
+            self.tm.reset()
+
+
 class Session:
     def __init__(self, live: Live):
         self.live = live
         self._real_on = False
         self._manus_on = False
-        self._manus_ergo = None                # 최근 Manus ergonomics (Tesollo 이름)
-        self.control_hand = "right"            # 사람 손(왼손 장갑이면 left — DexPilot 이 반사)
+        self.sides = "right"                   # 사람 손: "right" | "left" | "both"
+        self.lanes: dict[str, Lane] = {}
         self.hand = "dg5f"
         self.knobs: dict = {}
         self.locks: dict = {}
         self.source = {"kind": "preset", "name": "open"}
-        self.rt = None
-        self.tm = None                         # Tesollo 공식 Manus 매핑(dg5f 만)
         self.backend = "dexpilot"              # 메인 손: "dexpilot" | "tesollo"
-        self.compare = False                   # 다른 방식 손을 옆에 같이
+        self.compare = False                   # 다른 방식 손을 옆에 같이(한 손 모드만)
         self.err = ""
-        self.rec: list | None = None           # [(t, kp)] 녹화 중이면 list
-        self.replay = None                     # (t[], kp[], t0)
+        self.rec: list | None = None           # [(t, kp_r|NaN, kp_l|NaN)] 녹화 중이면 list
+        self.replay = None                     # (t[], {side: kp[]}, t0)
         self.rebuild()
 
     def rebuild(self):
+        lanes = {}
         try:
-            self.rt = hands.build(self.hand, self.knobs, self.locks, control_hand=self.control_hand)
-            self.tm = None
-            if self.hand == "dg5f":
-                lim = {j: (min(a, b), max(a, b)) for _d, j, a, b in hands.dof_space(self.hand)[1]}
-                self.tm = TesolloMap(lim, calib=bool(self.knobs.get("tesollo_calib", True)),
-                                     thumb_in_off=float(self.knobs.get("thumb_in_off", 0.0)),
-                                     thumb_elev0=float(self.knobs.get("thumb_elev0", 15.0)),
-                                     filter=(self.knobs.get("filter")
-                                             or hands.DEFAULT_KNOBS["filter"]))
+            for side in SIDES.get(self.sides, ("right",)):
+                ln = Lane(side)
+                ln.rt = hands.build(self.hand, self.knobs, self.locks, control_hand=side)
+                if self.hand == "dg5f":
+                    lim = {j: (min(a, b), max(a, b))
+                           for _d, j, a, b in hands.dof_space(self.hand)[1]}
+                    ln.tm = TesolloMap(lim, calib=bool(self.knobs.get("tesollo_calib", True)),
+                                       thumb_in_off=float(self.knobs.get("thumb_in_off", 0.0)),
+                                       thumb_elev0=float(self.knobs.get("thumb_elev0", 15.0)),
+                                       filter=(self.knobs.get("filter")
+                                               or hands.DEFAULT_KNOBS["filter"]),
+                                       side=side)
+                lanes[side] = ln
             self.err = ""
-        except Exception as e:                 # 설정 오류는 화면에 띄우고 이전 rt 유지 안 함
-            self.rt = None
+        except Exception as e:                 # 설정 오류는 화면에 띄우고 레인 없음
+            lanes = {}
             self.err = f"{type(e).__name__}: {e}"
+        self.lanes = lanes
 
-    # --- input
-    def keypoints(self):
-        s = self.source
-        if s["kind"] == "preset":
-            return synth.PRESETS[s.get("name", "open")]()
-        if s["kind"] == "synth":
-            p = s.get("params", {})
-            return synth.hand(curl=p.get("curl"), spread=p.get("spread"),
-                              thumb_lift_deg=float(p.get("thumb_lift", 20)),
-                              thumb_curl_deg=float(p.get("thumb_curl", 10)),
-                              thumb_swing_deg=float(p.get("thumb_swing", 0)))
+    # --- input: {side: kp (25,3) | None}
+    def keypoints(self) -> dict:
+        s, sides = self.source, list(self.lanes)
+        if s["kind"] in ("preset", "synth"):
+            if s["kind"] == "preset":
+                base = synth.PRESETS[s.get("name", "open")]()
+            else:
+                p = s.get("params", {})
+                base = synth.hand(curl=p.get("curl"), spread=p.get("spread"),
+                                  thumb_lift_deg=float(p.get("thumb_lift", 20)),
+                                  thumb_curl_deg=float(p.get("thumb_curl", 10)),
+                                  thumb_swing_deg=float(p.get("thumb_swing", 0)))
+            return {sd: (base if sd == "right" else mirror_kp(base)) for sd in sides}
         if s["kind"] == "live":
-            kp = self.live.keypoints()
-            if kp is not None and self.rec is not None:
-                self.rec.append((time.monotonic(), kp.copy()))
-            return kp
+            kps = {sd: self.live.keypoints(sd) for sd in ("right", "left")}
+            if self.rec is not None and any(v is not None for v in kps.values()):
+                nan = np.full((25, 3), np.nan)
+                self.rec.append((time.monotonic(),
+                                 nan if kps["right"] is None else kps["right"].copy(),
+                                 nan if kps["left"] is None else kps["left"].copy()))
+            return {sd: kps[sd] for sd in sides}
         if s["kind"] == "manus":
-            r = MANUS.latest()
-            if r is None:
-                return None
-            kp, self._manus_ergo, side, _gid = r
-            if side and side != self.control_hand:   # 왼손 장갑 → 오른손 로봇: 손바닥 평면 반사
-                self.control_hand = side
-                self.rebuild()
-            return kp
+            out = {}
+            for sd in sides:
+                r = MANUS.latest(sd)           # 그 손 장갑이 없으면 다른 손을 돌려준다 → 거른다
+                ok = r is not None and r[2] == sd
+                out[sd] = r[0] if ok else None
+                self.lanes[sd].ergo = r[1] if ok else None
+            return out
         if s["kind"] == "replay" and self.replay is not None:
             t, kps, t0 = self.replay
             el = (time.monotonic() - t0) % max(t[-1], 1e-3)
-            return kps[int(np.searchsorted(t, el, side="right")) - 1]
-        return None
+            i = int(np.searchsorted(t, el, side="right")) - 1
+            out = {}
+            for sd in sides:
+                arr = kps.get(sd)
+                v = None if arr is None else arr[i]
+                out[sd] = None if v is None or not np.isfinite(v[1:]).all() else v
+            return out
+        return {sd: None for sd in sides}
 
     def set_manus(self, on: bool):
         if on and not self._manus_on:
@@ -218,31 +291,35 @@ class Session:
 
     # --- one tick
     def frame(self) -> dict:
-        out = {"type": "frame", "hand": self.hand, "err": self.err,
+        out = {"type": "frame", "hand": self.hand, "err": self.err, "sides": list(self.lanes),
                "live": self.live.status(), "rec": None if self.rec is None else len(self.rec)}
         if self.source.get("kind") == "real":
             return self.real_frame(out)
         if self.source.get("kind") == "manus":
-            out["manus"] = {**MANUS.status(), "control_hand": self.control_hand}
-        if self.rt is None:
+            out["manus"] = MANUS.status()
+        if not self.lanes:
             return out
-        kp = self.keypoints()
+        kps = self.keypoints()
+        filtered = self.source["kind"] in ("live", "replay", "manus")
+        compare = self.compare and len(self.lanes) == 1
+        out["lanes"] = {sd: self.lane_frame(ln, kps.get(sd), filtered, compare)
+                        for sd, ln in self.lanes.items()}
+        return out
+
+    def lane_frame(self, ln: Lane, kp, filtered: bool, compare: bool) -> dict:
         if kp is None:
-            out["nokp"] = True
-            return out
-        rt = self.rt
+            return {"nokp": True}
+        rt = ln.rt
         names = [j for _, j, *_ in rt._map]
         t0 = time.perf_counter()
-        filtered = self.source["kind"] in ("live", "replay", "manus")
         q_dp = rt._step(kp, filtered=filtered)       # 항상 돈다(warm start·투영 상태 유지)
         ms = (time.perf_counter() - t0) * 1e3
         if q_dp is None:
-            out["nokp"] = True
-            return out
+            return {"nokp": True}
+        out = {}
         q_t = None
-        if self.tm is not None:
-            use_ergo = self.source["kind"] == "manus" and self._manus_ergo is not None
-            d = self.tm(kp, filtered=filtered, ergo=self._manus_ergo if use_ergo else None)
+        if ln.tm is not None:
+            d = ln.tm(kp, filtered=filtered, ergo=ln.ergo)
             if d is not None and self.knobs.get("tesollo_thumb_dp", True):
                 # 엄지는 DexPilot 해를 쓴다: 각도 대응만으로는 대립(손바닥 가로지르기)이 안 나온다
                 # (Quest 에서 대립 중 손바닥 평면 안 벌림각이 0 근처로 무너져 thumb1 이 작아짐)
@@ -250,18 +327,19 @@ class Session:
                     if n.startswith("rj_dg_1_"):
                         d[n] = float(v)
             q_t = None if d is None else np.array([d[n] for n in names])
-            out["ergo"] = {k: round(v, 1) for k, v in self.tm.ergo.items()}
+            out["ergo"] = {k: round(v, 1) for k, v in ln.tm.ergo.items()}
         use_t = self.backend == "tesollo" and q_t is not None
         q = q_t if use_t else q_dp
         other = q_dp if use_t else q_t
         out["backend"] = "tesollo" if use_t else "dexpilot"
-        if self.compare and other is not None:
+        if compare and other is not None:
             out["q_ghost"] = {n: float(v) for n, v in zip(names, other)}
             out["ghost_backend"] = "dexpilot" if use_t else "tesollo"
         P, _ = rt.chain.fk(q, jac=False)
         tips_r = P[:rt._n_tip]
         targets = rt.to_robot(kp)                                    # [root, tips…]
-        # 사람 손 전체(25점)를 같은 손 프레임으로 — 표시용(뼈길이 정규화 전, 손 단위 scale)
+        # 사람 손 전체(25점)를 같은 손 프레임으로 — 표시용(뼈길이 정규화 전, 손 단위 scale).
+        # 왼손은 _to_hand_frame 이 반사해 오른손 로봇 프레임에 놓는다(화면이 거울로 되돌림).
         root_h, R_h = rt.human_frame(kp)
         skel = rt._to_hand_frame(kp - root_h, R_h) @ rt._R_r.T * rt.scale + rt._root_r
         lo, hi = rt._lo, rt._hi
@@ -295,23 +373,25 @@ class Session:
             self.locks = {k: float(v) for k, v in (m.get("locks") or {}).items()}
             self.backend = m.get("backend", self.backend)
             self.compare = bool(m.get("compare", self.compare))
+            sides = m.get("sides", self.sides)
+            self.sides = sides if sides in SIDES else "right"
             self.rebuild()
         elif t == "source":
             self.source = {k: v for k, v in m.items() if k != "type"}
             self.set_real(self.source["kind"] == "real")
             self.set_manus(self.source["kind"] == "manus")
-            if self.source["kind"] != "manus" and self.control_hand != "right":
-                self.control_hand = "right"
-                self.rebuild()
             if self.source["kind"] == "live":
+                for ln in self.lanes.values():
+                    ln.reset()
                 return {"type": "live", **self.live.start()}
             if self.source["kind"] == "replay":
                 d = np.load(RECORDINGS / pathlib.Path(self.source["file"]).name)
-                self.replay = (d["t"] - d["t"][0], d["kp"], time.monotonic())
-            if self.rt is not None:
-                self.rt.reset()
-            if self.tm is not None:
-                self.tm.reset()
+                # 양손 녹화(kp_r/kp_l, 없는 손은 NaN) · 옛 녹화(kp = 오른손)
+                kps = ({"right": d["kp_r"], "left": d["kp_l"]} if "kp_r" in d.files
+                       else {"right": d["kp"]})
+                self.replay = (d["t"] - d["t"][0], kps, time.monotonic())
+            for ln in self.lanes.values():
+                ln.reset()
         elif t == "record":
             if m.get("on"):
                 self.rec = []
@@ -319,8 +399,10 @@ class Session:
                 RECORDINGS.mkdir(exist_ok=True)
                 name = time.strftime("%y%m%d_%H%M%S") + ".npz"
                 if self.rec:
+                    kp_r = np.stack([r[1] for r in self.rec])
                     np.savez(RECORDINGS / name, t=np.array([r[0] for r in self.rec]),
-                             kp=np.stack([r[1] for r in self.rec]))
+                             kp_r=kp_r, kp_l=np.stack([r[2] for r in self.rec]),
+                             kp=kp_r)          # 옛 형식 호환(오른손)
                 n, self.rec = len(self.rec), None
                 return {"type": "saved", "file": name if n else None, "frames": n}
         elif t == "real_reset":
@@ -339,8 +421,9 @@ class Session:
                                for n, j, lo, hi in P.DOF_SPECS}}
             (RECORDINGS / name).write_text(json.dumps(data, ensure_ascii=False, indent=1))
             return {"type": "real_saved", "file": str(RECORDINGS / name)}
-        elif t == "reset" and self.rt is not None:
-            self.rt.reset()
+        elif t == "reset":
+            for ln in self.lanes.values():
+                ln.reset()
         return None
 
 

@@ -62,6 +62,8 @@
   </div>
 
   <h2>입력</h2>
+  <div class="row"><label>사람 손</label><span id="sidebtns"><button data-side="right">오른손</button><button data-side="left">왼손</button><button data-side="both">양손</button></span></div>
+  <div class="muted">왼손 로봇 = 오른손 URDF 의 거울상(DG-5F LEFT 는 RIGHT 의 거울). 합성 입력은 오른손 자세를 거울로 뒤집어 왼손으로 쓴다.</div>
   <div class="row" id="srcbtns">
     <button data-src="preset" class="on">합성 프리셋</button>
     <button data-src="synth">합성 슬라이더</button>
@@ -80,7 +82,7 @@
   <div id="src-replay" class="row"><select id="recsel"></select><button id="recrefresh">새로고침</button></div>
   <div id="src-manus">
     <div class="muted">Manus Metagloves 를 이 서버(ro1)에 꽂힌 동글로 직접 읽는다(SDK Integrated, 읽기만).
-      다른 Manus 프로그램(예제·대시보드)은 꺼 둘 것. 왼손 장갑이면 손바닥 평면 반사로 오른손 로봇에 매핑.
+      다른 Manus 프로그램(예제·대시보드)은 꺼 둘 것. 위 '사람 손' 선택에 맞는 장갑(오른손/왼손/양쪽)을 쓴다.
       Tesollo 공식 매핑은 장갑의 관절각(ergonomics)을 그대로 쓴다.</div>
     <div class="row"><span id="manusstat" class="muted">-</span></div>
   </div>
@@ -104,6 +106,7 @@
   <div class="row"><label>로봇 투명도</label><input type="range" id="opacity" min="0.15" max="1" step="0.05" value="0.85"><span class="v" id="opacityv"></span></div>
   <div class="row"><button data-cam="palm">손바닥</button><button data-cam="side">옆</button><button data-cam="back">손등</button><button data-cam="top">위</button></div>
 
+  <div class="row" id="tsiderow"><label>표</label><button data-ts="right">오른손</button><button data-ts="left">왼손</button></div>
   <h2>손끝</h2>
   <table id="tips"></table>
   <h2>손끝 쌍 (엄지–손가락 = s1)</h2>
@@ -141,11 +144,14 @@ const KP_FINGER = i => i <= 4 ? 'thumb' : FINGERS[1 + Math.floor((i - 5) / 5)];
 const STORE = 'retargetViewer.v1';
 const S = { hand: 'dg5f', src: 'preset', preset: 'open', knobs: null, locks: {}, synth: null,
             show: { skeleton: true, targets: true, tips: true, errlines: true, pairs: true, axes: false },
-            opacity: 0.85, cam: 'palm', backend: 'dexpilot', compare: true };
+            opacity: 0.85, cam: 'palm', backend: 'dexpilot', compare: true,
+            sides: 'right', tableSide: 'right' };
 try { Object.assign(S, JSON.parse(localStorage.getItem(STORE) || '{}')); } catch (e) {}
 const save = () => { try { localStorage.setItem(STORE, JSON.stringify(S)); } catch (e) {} };
-let INFO = null, robot = null, overlay = null, last = null, loadTok = 0;
-let ghost = null;   // 비교 손 (다른 리타겟 방식)
+let INFO = null, last = null, loadTok = 0;
+// 손 3개: R = 오른손 로봇, L = 왼손 로봇(오른손 URDF 거울), G = 비교 손(한 손 모드에서 다른 리타겟 방식)
+const V = {};
+let robot = null;   // = V.R.robot (실물 미러가 쓰는 오른손)
 
 // ------------------------------------------------------------------ three
 const canvas = $('c');
@@ -160,8 +166,12 @@ controls.enableDamping = true;
 scene.add(new THREE.HemisphereLight(0xe8eeff, 0x30343c, 1.1));
 const key = new THREE.DirectionalLight(0xffffff, 1.4); key.position.set(0.4, 0.8, 0.6); scene.add(key);
 const fill = new THREE.DirectionalLight(0xbcd2ff, 0.5); fill.position.set(-0.6, 0.1, -0.5); scene.add(fill);
-const pivot = new THREE.Group(); pivot.rotation.x = -Math.PI / 2; scene.add(pivot);   // URDF Z-up → three Y-up
-const pivot2 = new THREE.Group(); pivot2.rotation.x = -Math.PI / 2; scene.add(pivot2); // 비교 손
+// 손마다 pivot(URDF Z-up → three Y-up) → mir(거울 행렬, 왼손만) → robot
+for (const k of ['R', 'L', 'G']) {
+  const pivot = new THREE.Group(); pivot.rotation.x = -Math.PI / 2; scene.add(pivot);
+  const mir = new THREE.Group(); mir.matrixAutoUpdate = false; pivot.add(mir);
+  V[k] = { pivot, mir, robot: null, overlay: null, mirrored: false };
+}
 const grid = new THREE.GridHelper(0.6, 12, 0x2c323c, 0x22262d); grid.position.y = -0.12; scene.add(grid);
 function resize() {
   const r = $('viewport').getBoundingClientRect();
@@ -183,41 +193,66 @@ function loadRobot() {
     else if (ext === 'dae') dae.load(path, c => done(c.scene), undefined, e => done(null, e));
     else done(null, new Error('mesh 형식 미지원: ' + path));
   };
-  let pending = null, pending2 = null;
-  manager.onLoad = () => { if (pending && pending2 && tok === loadTok) { setupRobot(pending, pending2); pending = pending2 = null; } };
-  loader.load(h.urdf, r => { pending = r; }, undefined, e => showErr('URDF 로드 실패: ' + e));
-  loader.load(h.urdf, r => { pending2 = r; }, undefined, e => showErr('URDF 로드 실패: ' + e));
+  const got = {};
+  manager.onLoad = () => { if (got.R && got.L && got.G && tok === loadTok) setupRobots(got); };
+  for (const k of ['R', 'L', 'G'])
+    loader.load(h.urdf, r => { got[k] = r; }, undefined, e => showErr('URDF 로드 실패: ' + e));
 }
-function setupRobot(r, r2) {
-  if (robot) { pivot.remove(robot); robot.traverse(o => { o.geometry?.dispose(); }); }
-  if (ghost) { pivot2.remove(ghost); ghost.traverse(o => { o.geometry?.dispose(); }); }
-  robot = r; pivot.add(robot);
-  ghost = r2; pivot2.add(ghost); ghost.visible = false;
-  ghost.traverse(o => {
-    if (!o.isMesh) return;
-    o.material = new THREE.MeshStandardMaterial({ color: 0x7fb4ff, roughness: 0.6, transparent: true, opacity: 0.45, side: THREE.DoubleSide });
-  });
-  robot.traverse(o => {
-    if (!o.isMesh) return;
-    o.material = new THREE.MeshStandardMaterial({ color: 0xb8bec8, roughness: 0.55, metalness: 0.05,
-                                                  transparent: true, opacity: S.opacity, side: THREE.DoubleSide });
-  });
-  colorFingers();
+function setupRobots(got) {
   const h = INFO.hands[S.hand];
-  overlay = new THREE.Group();
-  robot.links[h.base_link].add(overlay);
-  // 비교 손은 새끼쪽(base −y)으로 손 폭만큼 옆에
-  robot.updateMatrixWorld(true);
-  const qb = robot.links[h.base_link].getWorldQuaternion(new THREE.Quaternion());
-  pivot2.position.copy(new THREE.Vector3(0, -0.15, 0).applyQuaternion(qb));
+  for (const k of ['R', 'L', 'G']) {
+    const v = V[k];
+    if (v.robot) { v.mir.remove(v.robot); v.robot.traverse(o => { o.geometry?.dispose(); }); }
+    v.robot = got[k]; v.mir.add(v.robot);
+    v.robot.traverse(o => {
+      if (!o.isMesh) return;
+      o.material = k === 'G'
+        ? new THREE.MeshStandardMaterial({ color: 0x7fb4ff, roughness: 0.6, transparent: true, opacity: 0.45, side: THREE.DoubleSide })
+        : new THREE.MeshStandardMaterial({ color: 0xb8bec8, roughness: 0.55, metalness: 0.05,
+                                           transparent: true, opacity: S.opacity, side: THREE.DoubleSide });
+    });
+    if (k !== 'G') colorFingers(v.robot);
+    v.overlay = new THREE.Group();
+    v.robot.links[h.base_link].add(v.overlay);
+  }
+  robot = V.R.robot;
+  // 거울: base 프레임에서 y(엄지 쪽) 축만 뒤집는다 — M = B·diag(1,−1,1)·B⁻¹ (B = 루트→base_link)
+  V.R.mir.matrix.identity(); V.R.pivot.updateMatrixWorld(true);
+  const B = new THREE.Matrix4().copy(V.R.robot.matrixWorld).invert()
+              .multiply(V.R.robot.links[h.base_link].matrixWorld);
+  MIRROR.copy(B).multiply(new THREE.Matrix4().makeScale(1, -1, 1)).multiply(B.clone().invert());
+  const qb = V.R.robot.links[h.base_link].getWorldQuaternion(new THREE.Quaternion());
+  YW.set(0, 1, 0).applyQuaternion(qb);          // 오른손 base y(엄지 쪽) 의 월드 방향
+  applyLayout();
   setCam(S.cam);
 }
-function colorFingers() {           // 손끝 링크까지의 체인을 손가락 색으로 옅게
+const MIRROR = new THREE.Matrix4(), YW = new THREE.Vector3();
+function setMirror(v, on) {
+  v.mirrored = on; v.mir.matrix.copy(on ? MIRROR : new THREE.Matrix4()); v.mir.matrixWorldNeedsUpdate = true;
+}
+// 배치: 손바닥 시점에서 오른손 = 화면 오른쪽, 왼손 = 왼쪽(내 두 손바닥을 보는 것과 같게)
+function applyLayout() {
+  document.querySelectorAll('#sidebtns button').forEach(b => b.classList.toggle('on', b.dataset.side === S.sides));
+  $('tsiderow').hidden = S.sides !== 'both';
+  document.querySelectorAll('#tsiderow button').forEach(b => b.classList.toggle('on', b.dataset.ts === S.tableSide));
+  if (!V.R.robot) return;
+  const sides = S.src === 'real' ? 'right' : S.sides;
+  const at = (v, y) => v.pivot.position.copy(YW).multiplyScalar(y);
+  setMirror(V.L, true);
+  if (sides === 'both') { at(V.R, 0.1); at(V.L, -0.1); }
+  else { at(V.R, 0); at(V.L, 0); }
+  setMirror(V.G, sides === 'left');
+  at(V.G, sides === 'left' ? 0.15 : -0.15);
+  V.R.robot.visible = sides !== 'left';
+  V.L.robot.visible = sides !== 'right';
+  V.G.robot.visible = false;
+}
+function colorFingers(rb) {         // 손끝 링크까지의 체인을 손가락 색으로 옅게
   const h = INFO.hands[S.hand];
   for (const f of FINGERS) {
-    let o = robot.links[h.tip_links[f]];
+    let o = rb.links[h.tip_links[f]];
     const c = new THREE.Color(FCOL[f]).lerp(new THREE.Color(0xb8bec8), 0.6);
-    while (o && o !== robot.links[h.base_link] && o !== robot) {
+    while (o && o !== rb.links[h.base_link] && o !== rb) {
       if (o.isURDFLink) o.children.forEach(ch => { if (ch.isURDFVisual) ch.traverse(m => { if (m.isMesh) m.material.color.copy(c); }); });
       o = o.parent;
     }
@@ -226,9 +261,11 @@ function colorFingers() {           // 손끝 링크까지의 체인을 손가�
 function setCam(v) {
   S.cam = v; save();
   if (!robot) return;
-  scene.updateMatrixWorld(true);            // pivot2 이동이 반영된 뒤에 상자를 잰다
-  const box = new THREE.Box3().setFromObject(robot);
-  if (S.compare && ghost) { const v = ghost.visible; ghost.visible = true; box.union(new THREE.Box3().setFromObject(ghost)); ghost.visible = v; }
+  scene.updateMatrixWorld(true);            // 배치(pivot 이동)가 반영된 뒤에 상자를 잰다
+  const box = new THREE.Box3();
+  const sides = S.src === 'real' ? 'right' : S.sides;
+  const use = [sides !== 'left' && V.R, sides !== 'right' && V.L, sides !== 'both' && S.compare && V.G].filter(Boolean);
+  for (const v of use) { const vis = v.robot.visible; v.robot.visible = true; box.union(new THREE.Box3().setFromObject(v.robot)); v.robot.visible = vis; }
   const c = box.getCenter(new THREE.Vector3());
   const d = box.getSize(new THREE.Vector3()).length() * 1.6;
   // base 프레임 축을 월드로: 손바닥 법선이 어디냐는 손마다 다르니 base_link 의 회전에서 뽑는다
@@ -253,7 +290,7 @@ function seg(a, b, c, o) {
   const g = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(...a), new THREE.Vector3(...b)]);
   const l = new THREE.Line(g, lmat(c, o)); l.renderOrder = 9; return l;
 }
-function drawOverlay(f) {
+function drawOverlay(overlay, f) {
   if (!overlay) return;
   overlay.children.slice().forEach(o => { overlay.remove(o); o.geometry?.dispose?.(); });
   const sh = S.show;
@@ -311,7 +348,7 @@ function connect() {
 }
 const send = o => ws && ws.readyState === 1 && ws.send(JSON.stringify(o));
 const sendConfig = () => send({ type: 'config', hand: S.hand, knobs: S.knobs, locks: S.locks,
-                                backend: S.backend, compare: S.compare });
+                                backend: S.backend, compare: S.compare, sides: S.sides });
 function sendSource() {
   if (S.src === 'preset') send({ type: 'source', kind: 'preset', name: S.preset });
   else if (S.src === 'synth') send({ type: 'source', kind: 'synth', params: S.synth });
@@ -336,30 +373,40 @@ function onFrame(f) {
   $('recstat').textContent = f.rec != null ? `녹화 중 ${f.rec} 프레임` : $('recstat').textContent;
   if (f.real) { onReal(f); return; }
   if (f.manus) {
-    const M = f.manus, g = (M.gloves || [])[0];
+    const M = f.manus, gl = M.gloves || [];
     $('manusstat').innerHTML = M.err ? `<span class="err">${M.err}</span>` :
       !M.connected ? '<span style="color:var(--warn)">● SDK 시작 중…</span>' :
-      g ? `<span style="color:var(--ok)">● 장갑 ${g.id} (${g.side === 'left' ? '왼손' : '오른손'})</span> · ${M.via === 'bridge' ? '브리지 경유' : 'SDK 직접'} · ${g.n} 프레임 · 로봇 매핑: ${M.control_hand === 'left' ? '왼손→오른손 반사' : '그대로'}` :
+      gl.length ? `<span style="color:var(--ok)">● 장갑 ${gl.map(g => `${g.id}(${g.side === 'left' ? '왼손' : '오른손'})`).join(' · ')}</span> · ${M.via === 'bridge' ? '브리지 경유' : 'SDK 직접'}` :
       '<span style="color:var(--warn)">● 동글 연결됨 — 장갑 전원을 켜세요</span>';
   }
-  if (!f.q) { $('hud').innerHTML = f.nokp ? '<b>손 프레임 없음</b> (추적 안 됨 / 대기)' : ''; return; }
+  const lanes = f.lanes || {};
   last = f;
-  if (robot) {
-    for (const [j, v] of Object.entries(f.q)) robot.joints[j]?.setJointValue(v);
+  const view = sd => sd === 'right' ? V.R : V.L;
+  for (const sd of ['right', 'left']) {
+    const lf = lanes[sd], v = view(sd);
+    if (!lf || !v.robot) continue;
+    if (lf.q) { for (const [j, val] of Object.entries(lf.q)) v.robot.joints[j]?.setJointValue(val); drawOverlay(v.overlay, lf); }
+    else v.overlay?.children.slice().forEach(o => v.overlay.remove(o));
   }
-  if (ghost) {
-    ghost.visible = !!f.q_ghost;
-    if (f.q_ghost) for (const [j, v] of Object.entries(f.q_ghost)) ghost.joints[j]?.setJointValue(v);
+  const keys = Object.keys(lanes);
+  const lone = keys.length === 1 ? lanes[keys[0]] : null;
+  if (V.G.robot) {
+    V.G.robot.visible = !!(lone && lone.q_ghost);
+    if (V.G.robot.visible) for (const [j, val] of Object.entries(lone.q_ghost)) V.G.robot.joints[j]?.setJointValue(val);
   }
-  drawOverlay(f);
-  renderTables(f);
-  if (f.ergo && f.ergo.ThumbInPlane !== undefined) $('thumbmeas').textContent = `엄지 측정: 평면 안 벌림 ${f.ergo.ThumbInPlane}° · 손바닥 쪽 들림 ${f.ergo.ThumbElevation}° (손 편 상태에서 thumb2≈0 이 되게 '대립 중립'을 들림각 근처로)`;
-  const proj = f.pairs.filter(p => p.proj).map(p => `${p.a}–${p.b}`).join(', ') || '-';
+  const SN = { right: '오른손', left: '왼손' };
+  const live = Object.entries(lanes).filter(([, lf]) => lf.q);
+  if (!live.length) { $('hud').innerHTML = keys.length ? '<b>손 프레임 없음</b> (추적 안 됨 / 대기)' : ''; return; }
+  const ts = lanes[S.tableSide]?.q ? S.tableSide : live[0][0], F = lanes[ts];
+  renderTables(F);
+  if (F.ergo && F.ergo.ThumbInPlane !== undefined) $('thumbmeas').textContent = `엄지 측정(${SN[ts]}): 평면 안 벌림 ${F.ergo.ThumbInPlane}° · 손바닥 쪽 들림 ${F.ergo.ThumbElevation}° (손 편 상태에서 thumb2≈0 이 되게 '대립 중립'을 들림각 근처로)`;
   const BE = { dexpilot: 'DexPilot(+λ)', tesollo: 'Tesollo 공식 매핑' };
-  $('hud').innerHTML = `<b>${INFO.hands[S.hand].label}</b> · 메인 <b>${BE[f.backend] || '-'}</b>` +
-    (f.q_ghost ? ` · 반투명 파랑(왼쪽) = <b>${BE[f.ghost_backend]}</b>` : '') +
-    ` · solve <b>${f.solve_ms.toFixed(1)} ms</b> · 투영 쌍 <b>${proj}</b>` +
-    (f.at_limit.length ? ` · <span style="color:var(--warn)">한계 ${f.at_limit.length}개</span>` : '') +
+  const per = Object.entries(lanes).map(([sd, lf]) => !lf.q ? `${SN[sd]} <span style="color:var(--warn)">추적 없음</span>` :
+    `${SN[sd]} solve <b>${lf.solve_ms.toFixed(1)} ms</b> · 투영 <b>${lf.pairs.filter(p => p.proj).map(p => `${p.a}–${p.b}`).join(', ') || '-'}</b>` +
+    (lf.at_limit.length ? ` · <span style="color:var(--warn)">한계 ${lf.at_limit.length}</span>` : '')).join(' &nbsp;|&nbsp; ');
+  $('hud').innerHTML = `<b>${INFO.hands[S.hand].label}</b> · 메인 <b>${BE[F.backend] || '-'}</b>` +
+    (lone && lone.q_ghost ? ` · 반투명 파랑 = <b>${BE[lone.ghost_backend]}</b>` : '') + ` · ${per}` +
+    (S.sides === 'both' ? ` · 표 = ${SN[ts]}` : '') +
     `<br><span class="sw" style="background:#8a93a0"></span>사람 손(손 프레임) <span class="sw" style="background:#ffae42"></span>목표(뼈길이 정규화) <span class="sw" style="background:#fff"></span>로봇 손끝 <span class="sw" style="background:#ffff66"></span>투영 접촉`;
 }
 
@@ -369,8 +416,8 @@ function onReal(f) {
     (R.age_s != null ? ` · ${R.age_s}s 전` : '') + (R.err ? `<br><span class="err">${R.err}</span>` : '');
   if (!f.q) { $('hud').innerHTML = '<b>실물 각도 대기 중…</b>'; return; }
   if (robot) for (const [j, v] of Object.entries(f.q)) { const J = robot.joints[j]; if (J) { J.ignoreLimits = true; J.setJointValue(v); } }
-  if (ghost) ghost.visible = false;
-  if (overlay) overlay.children.slice().forEach(o => overlay.remove(o));
+  if (V.G.robot) V.G.robot.visible = false;
+  for (const v of [V.R, V.L]) v.overlay?.children.slice().forEach(o => v.overlay.remove(o));
   const bad = f.real_rows.filter(r => r.out_urdf).length, badm = f.real_rows.filter(r => r.out_manual).length;
   $('hud').innerHTML = `<b>실물 미러</b> (와이어° → URDF° 변환 없음) · URDF 범위 밖 <b style="color:${bad ? 'var(--warn)' : 'var(--ok)'}">${bad}</b>개 · 매뉴얼 범위 밖 <b>${badm}</b>개`;
   const wide = (m, b) => m && (m[0] < b[0] - 2 || m[1] > b[1] + 2);
@@ -473,7 +520,7 @@ function buildDisplay() {
   const names = { skeleton: '사람 손', targets: '목표점', tips: '로봇 손끝', errlines: '오차선', pairs: '투영 접촉', axes: 'base 축' };
   for (const [k, n] of Object.entries(names)) {
     const b = document.createElement('button'); b.textContent = n; b.classList.toggle('on', !!S.show[k]);
-    b.onclick = () => { S.show[k] = !S.show[k]; save(); buildDisplay(); if (last) drawOverlay(last); };
+    b.onclick = () => { S.show[k] = !S.show[k]; save(); buildDisplay(); if (last && last.lanes) onFrame(last); };
     el.appendChild(b);
   }
 }
@@ -489,11 +536,14 @@ async function init() {
   $('hand').value = S.hand;
   $('hand').onchange = () => { S.hand = $('hand').value; S.locks = {}; save(); buildLocks(); buildKnobs(); buildBackend(); sendConfig(); loadRobot(); };
   $('reset').onclick = () => send({ type: 'reset' });
+  document.querySelectorAll('#sidebtns button').forEach(b => b.onclick = () => {
+    S.sides = b.dataset.side; if (S.sides !== 'both') S.tableSide = S.sides; save(); applyLayout(); sendConfig(); setCam(S.cam); });
+  document.querySelectorAll('#tsiderow button').forEach(b => b.onclick = () => { S.tableSide = b.dataset.ts; save(); applyLayout(); if (last && last.lanes) onFrame(last); });
   document.querySelectorAll('#backendbtns button').forEach(b => b.onclick = () => { S.backend = b.dataset.be; save(); buildBackend(); sendConfig(); });
   $('compare').onchange = () => { S.compare = $('compare').checked; save(); sendConfig(); setCam(S.cam); };
   $('tcalib').onchange = () => { S.knobs.tesollo_calib = $('tcalib').checked; save(); sendConfig(); };
   $('tthumbdp').onchange = () => { S.knobs.tesollo_thumb_dp = $('tthumbdp').checked; save(); sendConfig(); };
-  document.querySelectorAll('#srcbtns button').forEach(b => b.onclick = () => { S.src = b.dataset.src; save(); buildSource(); sendSource(); });
+  document.querySelectorAll('#srcbtns button').forEach(b => b.onclick = () => { S.src = b.dataset.src; save(); buildSource(); sendSource(); applyLayout(); setCam(S.cam); });
   document.querySelectorAll('[data-cam]').forEach(b => b.onclick = () => setCam(b.dataset.cam));
   $('recbtn').onclick = () => {
     const on = !$('recbtn').classList.contains('rec');
@@ -506,9 +556,9 @@ async function init() {
   $('recrefresh').onclick = refreshRecordings;
   $('opacity').value = S.opacity; $('opacityv').textContent = S.opacity;
   $('opacity').oninput = () => { S.opacity = +$('opacity').value; $('opacityv').textContent = S.opacity; save();
-    robot?.traverse(o => { if (o.isMesh) o.material.opacity = S.opacity; }); };
+    for (const v of [V.R, V.L]) v.robot?.traverse(o => { if (o.isMesh) o.material.opacity = S.opacity; }); };
   $('recsel').innerHTML = INFO.recordings.map(n => `<option>${n}</option>`).join('') || '<option value="">(녹화 없음)</option>';
-  buildSource(); buildKnobs(); buildBackend(); buildLocks(); buildDisplay();
+  buildSource(); buildKnobs(); buildBackend(); buildLocks(); buildDisplay(); applyLayout();
   loadRobot();
   connect();
 }
