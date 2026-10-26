@@ -3,7 +3,7 @@
 SDK 예제(sdk_client.py `C`)와 같은 SDK 함수(CoreSdk_GloveCalibration*)를 쓰지만,
 예제는 화면에 마지막 상태만 남겨 어느 단계가 빠졌는지 알 수 없고(Finish 가 "not all steps have been
 finished" 로 거부), P 로 실행 없이 넘어갈 수 있다. 여기서는:
-  * 1 → 마지막 단계를 순서대로만 진행(건너뛰기 없음),
+  * 1 → 마지막 단계를 순서대로만 진행(건너뛰기 없음, b 로 이전 단계로 돌아가 다시 할 수는 있음),
   * 단계마다 Enter → 기록(정지 자세는 고정, 반복 동작 단계는 계속 반복) → 성공/실패 출력, 실패면 같은 단계를 다시,
   * 전부 성공해야 Finish, 끝나면 SDK 를 정상 종료(설정 파일에 장갑별로 저장).
 
@@ -116,20 +116,40 @@ def main():
         ok = ffi.new("bool*")
         if lib.CoreSdk_GloveCalibrationStart(ca[0], ok) != 0 or not ok[0]:
             sys.exit("캘리브레이션 시작 실패")
-        print("\n단계마다: 자세를 잡고 Enter → 기록이 끝날 때까지 정지 자세는 고정, 반복 동작은 계속 반복. (q + Enter = 취소)\n")
-        for k, (t, d, s) in enumerate(steps):
-            while True:
-                print(f"[{k + 1}/{len(steps)}] {t}\n        {d}" + (f"\n        → {KO[t]}" if t in KO else ""))
-                if input("        자세를 잡았으면 Enter: ").strip().lower() == "q":
+        print("\n단계마다: 자세를 잡고 Enter → 기록이 끝날 때까지 정지 자세는 고정, 반복 동작은 계속 반복. (b + Enter = 이전 단계, q + Enter = 취소)\n")
+        k = 0
+        while True:
+            if k == len(steps):                     # 마지막 단계까지 끝 — 저장 전에 한 번 더 기회
+                ans = input("모든 단계 완료. Enter=저장(Finish) · b=마지막 단계 다시 · q=취소: ").strip().lower()
+                if ans == "q":
                     lib.CoreSdk_GloveCalibrationStop(ca[0], ok)
                     sys.exit("취소함 — 저장 안 됨")
-                print("        기록 중… 동작을 계속 반복하세요" if is_moving(t, d)
-                      else "        기록 중… 움직이지 마세요", flush=True)
-                sa = ffi.new("GloveCalibrationStepArgs*"); sa.gloveId = gid; sa.stepIndex = k
-                r = lib.CoreSdk_GloveCalibrationStartStep(sa[0], ok)
-                if r == 0 and ok[0]:
-                    print(f"        ✓ {k + 1}단계 완료\n")
-                    break
+                if ans == "b":
+                    k -= 1
+                    print()
+                    continue
+                break
+            t, d, s = steps[k]
+            print(f"[{k + 1}/{len(steps)}] {t}\n        {d}" + (f"\n        → {KO[t]}" if t in KO else ""))
+            ans = input("        자세를 잡고 Enter=기록 · b=이전 단계 · q=취소: ").strip().lower()
+            if ans == "q":
+                lib.CoreSdk_GloveCalibrationStop(ca[0], ok)
+                sys.exit("취소함 — 저장 안 됨")
+            if ans == "b":
+                if k == 0:
+                    print("        첫 단계입니다\n")
+                else:
+                    k -= 1
+                    print(f"        ← {k + 1}단계로 돌아갑니다 (다시 하고 나면 그다음 단계도 순서대로 다시)\n")
+                continue
+            print("        기록 중… 동작을 계속 반복하세요" if is_moving(t, d)
+                  else "        기록 중… 움직이지 마세요", flush=True)
+            sa = ffi.new("GloveCalibrationStepArgs*"); sa.gloveId = gid; sa.stepIndex = k
+            r = lib.CoreSdk_GloveCalibrationStartStep(sa[0], ok)
+            if r == 0 and ok[0]:
+                print(f"        ✓ {k + 1}단계 완료\n")
+                k += 1
+            else:
                 print(f"        ✗ {k + 1}단계 실패({SDKReturnCode(r).name}, result={bool(ok[0])}) — 같은 단계를 다시 합니다\n")
         if lib.CoreSdk_GloveCalibrationFinish(ca[0], ok) == 0 and ok[0]:
             print(f"✓ 캘리브레이션 완료·적용: 장갑 {gid:#x} ({a.side}). 종료하면 설정 파일에 저장됩니다.")
