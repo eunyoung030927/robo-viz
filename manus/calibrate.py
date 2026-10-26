@@ -4,7 +4,7 @@ SDK 예제(sdk_client.py `C`)와 같은 SDK 함수(CoreSdk_GloveCalibration*)를
 예제는 화면에 마지막 상태만 남겨 어느 단계가 빠졌는지 알 수 없고(Finish 가 "not all steps have been
 finished" 로 거부), P 로 실행 없이 넘어갈 수 있다. 여기서는:
   * 1 → 마지막 단계를 순서대로만 진행(건너뛰기 없음),
-  * 단계마다 Enter → 기록(손 고정) → 성공/실패 출력, 실패면 같은 단계를 다시,
+  * 단계마다 Enter → 기록(정지 자세는 고정, 반복 동작 단계는 계속 반복) → 성공/실패 출력, 실패면 같은 단계를 다시,
   * 전부 성공해야 Finish, 끝나면 SDK 를 정상 종료(설정 파일에 장갑별로 저장).
 
     python calibrate.py --side left          # 왼손 장갑 캘리브레이션
@@ -29,8 +29,21 @@ KO = {
     "Place your hand on a horizontal non-metal surface":
         "금속이 아닌 평평한 책상에 손바닥을 대고 올림. 엄지는 옆으로 벌리고 나머지 네 손가락은 붙여서 쭉 폄",
     "Make a fist": "손을 들고 주먹. 엄지는 주먹 옆면에 붙임",
+    "Open and close your fingers continually":
+        "손가락을 계속 폈다 쥐었다 반복 — 손끝이 손바닥 아래쪽(손목 쪽)에 닿게",
+    "Touch your knuckles with your thumb":
+        "엄지를 새끼손가락 뿌리(손바닥 쪽)로 가져갔다가 바깥으로 쭉 펴기를 반복",
     "Pinch your thumb and little finger": "엄지 끝과 새끼손가락 끝을 쌀알 집듯 가볍게 맞대고 정지",
 }
+
+
+# 설명에 이런 말이 있으면 반복 동작 단계 — 기록 중에 계속 움직여야 한다
+MOVING = ("repeatedly", "continually", "continuously", "repeat", "back and forth", "rotate")
+
+
+def is_moving(title: str, desc: str) -> bool:
+    t = f"{title} {desc}".lower()
+    return any(w in t for w in MOVING)
 
 
 def main():
@@ -103,14 +116,15 @@ def main():
         ok = ffi.new("bool*")
         if lib.CoreSdk_GloveCalibrationStart(ca[0], ok) != 0 or not ok[0]:
             sys.exit("캘리브레이션 시작 실패")
-        print("\n단계마다: 자세를 잡고 Enter → 기록이 끝날 때까지 손을 고정. (q + Enter = 취소)\n")
+        print("\n단계마다: 자세를 잡고 Enter → 기록이 끝날 때까지 정지 자세는 고정, 반복 동작은 계속 반복. (q + Enter = 취소)\n")
         for k, (t, d, s) in enumerate(steps):
             while True:
                 print(f"[{k + 1}/{len(steps)}] {t}\n        {d}" + (f"\n        → {KO[t]}" if t in KO else ""))
                 if input("        자세를 잡았으면 Enter: ").strip().lower() == "q":
                     lib.CoreSdk_GloveCalibrationStop(ca[0], ok)
                     sys.exit("취소함 — 저장 안 됨")
-                print("        기록 중… 움직이지 마세요", flush=True)
+                print("        기록 중… 동작을 계속 반복하세요" if is_moving(t, d)
+                      else "        기록 중… 움직이지 마세요", flush=True)
                 sa = ffi.new("GloveCalibrationStepArgs*"); sa.gloveId = gid; sa.stepIndex = k
                 r = lib.CoreSdk_GloveCalibrationStartStep(sa[0], ok)
                 if r == 0 and ok[0]:
